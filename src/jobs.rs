@@ -14,7 +14,10 @@ pub fn comm_is(data: &[u8], want: &str) -> bool {
 pub fn parse_worker_stamp(name: &str) -> Option<String> {
     let core = name.strip_prefix("Worker_")?.strip_suffix("-utc.log")?;
     let (date, time) = core.split_once('-')?;
-    if date.len() != 8 || time.len() != 6 || !date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit()) {
+    if date.len() != 8
+        || time.len() != 6
+        || !date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     Some(format!(
@@ -137,7 +140,10 @@ impl Jobs {
         let Some(root) = self.root.as_deref() else {
             return;
         };
-        if let Some(stamp) = newest_worker_log(root).as_deref().and_then(parse_worker_stamp) {
+        if let Some(stamp) = newest_worker_log(root)
+            .as_deref()
+            .and_then(parse_worker_stamp)
+        {
             self.last_job = Some(stamp);
         }
     }

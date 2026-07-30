@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph};
 
 use crate::app::App;
 use crate::fmt;
@@ -23,9 +23,23 @@ fn heat(percent: u16) -> Style {
     Style::new().fg(c)
 }
 
-fn bar_width(total: u16) -> usize {
-    let usable = total.saturating_sub(55);
-    usable.clamp(8, 32) as usize
+pub fn inner_width(total: u16) -> u16 {
+    total.saturating_sub(4)
+}
+
+pub fn bar_width(inner: u16) -> usize {
+    inner.saturating_sub(52).clamp(8, 32) as usize
+}
+
+pub fn full_bar_width(inner: u16) -> usize {
+    inner.saturating_sub(16).max(8) as usize
+}
+
+fn pad_block(title: &str) -> Block<'_> {
+    Block::bordered()
+        .border_style(DIM)
+        .padding(Padding::horizontal(1))
+        .title(Line::from(Span::styled(title, KEY)).right_aligned())
 }
 
 fn meter(label: &str, percent: Option<u16>, right: String, width: usize) -> Line<'static> {
@@ -53,7 +67,7 @@ fn meter_owned(label: String, percent: Option<u16>, right: String, width: usize)
 
 fn kv<'a>(key: &'a str, value: String) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!(" {key:<KEYW$}"), KEY),
+        Span::styled(format!("{key:<KEYW$}"), KEY),
         Span::raw(value),
     ])
 }
@@ -63,7 +77,10 @@ fn header(app: &App) -> Paragraph<'_> {
     let title = Line::from(vec![
         Span::styled(
             " citop ",
-            Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
+            Style::new()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -72,10 +89,10 @@ fn header(app: &App) -> Paragraph<'_> {
         ),
     ]);
     let os = Line::from(vec![Span::styled(
-        format!(" {} {} {}", h.os, h.kernel, h.arch),
+        format!("{} {} {}", h.os, h.kernel, h.arch),
         DIM,
     )]);
-    let model = Line::from(vec![Span::styled(format!(" {}", h.model), DIM)]);
+    let model = Line::from(vec![Span::styled(h.model.as_str(), DIM)]);
     Paragraph::new(vec![title, os, model])
 }
 
@@ -85,15 +102,22 @@ fn capacity(app: &App) -> Paragraph<'_> {
         (Some(a), Some(b)) => format!("{} x {}-{} MHz", h.cores, a, b),
         _ => format!("{} cores", h.cores),
     };
-    let ram = app
-        .mem
-        .info
-        .map(|m| fmt::bytes(m.total))
+    let clock = app
+        .cpu
+        .mhz
+        .map(|m| format!("{m} MHz"))
         .unwrap_or_else(|| "--".into());
-    let disk = app
-        .mem
-        .disk
-        .map(|d| fmt::bytes(d.total))
+    let load = app
+        .cpu
+        .load_avg
+        .map(|l| {
+            format!(
+                "{} {} {}",
+                fmt::centi(l.one),
+                fmt::centi(l.five),
+                fmt::centi(l.fifteen)
+            )
+        })
         .unwrap_or_else(|| "--".into());
     let tasks = app
         .cpu
@@ -102,8 +126,8 @@ fn capacity(app: &App) -> Paragraph<'_> {
         .unwrap_or_else(|| "--".into());
     Paragraph::new(vec![
         kv("cpu", freq),
-        kv("ram", ram),
-        kv("disk", disk),
+        kv("clock", clock),
+        kv("load", load),
         kv("tasks", tasks),
     ])
 }
@@ -116,15 +140,11 @@ fn runner(app: &App) -> Paragraph<'_> {
         _ => Style::new().fg(Color::Red),
     };
     let s = Line::from(vec![
-        Span::styled(format!(" {:<KEYW$}", "runner"), KEY),
+        Span::styled(format!("{:<KEYW$}", "runner"), KEY),
         Span::styled(state, style),
     ]);
     let up = app.uptime.secs.map(fmt::hms).unwrap_or_else(|| "--".into());
-    let last = app
-        .jobs
-        .last_job
-        .clone()
-        .unwrap_or_else(|| "never".into());
+    let last = app.jobs.last_job.clone().unwrap_or_else(|| "never".into());
     Paragraph::new(vec![
         s,
         kv("jobs", app.jobs.running.to_string()),
@@ -133,49 +153,23 @@ fn runner(app: &App) -> Paragraph<'_> {
     ])
 }
 
-pub fn cpu_summary(app: &App) -> String {
-    let agg = app
-        .cpu
-        .percent
-        .map(|p| format!("cpu {p}%"))
-        .unwrap_or_else(|| "cpu --".into());
-    let mhz = app
-        .cpu
-        .mhz
-        .map(|m| format!("  {m} MHz"))
-        .unwrap_or_default();
-    let load = app
-        .cpu
-        .load_avg
-        .map(|l| {
-            format!(
-                "  load {} {} {}",
-                fmt::centi(l.one),
-                fmt::centi(l.five),
-                fmt::centi(l.fifteen)
-            )
-        })
-        .unwrap_or_default();
-    format!(" {agg}{mhz}{load} ")
-}
-
-fn meters(app: &App, width: u16, cpu_rows: usize) -> Paragraph<'_> {
-    let w = bar_width(width);
+fn meters(app: &App, inner: u16, cpu_rows: usize) -> Paragraph<'_> {
+    let w = bar_width(inner);
+    let full = full_bar_width(inner);
     let mut out = Vec::with_capacity(cpu_rows + 4);
 
     if cpu_rows > 1 {
         for i in 0..cpu_rows {
             let p = app.cpu.per_core.get(i).copied().flatten();
-            out.push(meter_owned(format!("cpu_{i}"), p, String::new(), w));
+            out.push(meter_owned(format!("cpu_{i}"), p, String::new(), full));
         }
     } else {
-        out.push(meter("cpu", app.cpu.percent, String::new(), w));
+        out.push(meter("cpu", app.cpu.percent, String::new(), full));
     }
 
-    let tright = match (app.therm.milli_c, app.therm.trip_milli_c) {
-        (Some(t), Some(trip)) => format!("{} C  fan trip {} C", fmt::milli(t), fmt::milli(trip)),
-        (Some(t), None) => format!("{} C", fmt::milli(t)),
-        _ => "sensor unavailable".into(),
+    let tright = match app.therm.milli_c {
+        Some(t) => format!("{} C  {}", fmt::milli(t), app.fan.label()),
+        None => "sensor unavailable".into(),
     };
     let tpct = app.therm.milli_c.map(|_| app.therm.percent_of_range());
     out.push(meter("temp", tpct, tright, w));
@@ -236,7 +230,7 @@ fn meters(app: &App, width: u16, cpu_rows: usize) -> Paragraph<'_> {
 fn iface_line<'a>(slot: &'a str, i: Option<&'a crate::net::Iface>) -> Line<'a> {
     let Some(i) = i else {
         return Line::from(vec![
-            Span::styled(format!(" {slot:<LABEL$}"), KEY),
+            Span::styled(format!("{slot:<LABEL$}"), KEY),
             Span::styled("not present", DIM),
         ]);
     };
@@ -252,7 +246,7 @@ fn iface_line<'a>(slot: &'a str, i: Option<&'a crate::net::Iface>) -> Line<'a> {
     let rx = i.rx_rate.map(fmt::rate).unwrap_or_else(|| "--".into());
     let tx = i.tx_rate.map(fmt::rate).unwrap_or_else(|| "--".into());
     Line::from(vec![
-        Span::styled(format!(" {:<LABEL$}", i.name), KEY),
+        Span::styled(format!("{:<LABEL$}", i.name), KEY),
         Span::styled(format!("{:<5}", i.state), state_style),
         Span::styled(format!("{link:>7}  "), DIM),
         Span::styled("rx ", DIM),
@@ -294,43 +288,21 @@ pub fn render(frame: &mut Frame, app: &App) {
     ])
     .areas(area);
 
-    frame.render_widget(header(app), top);
+    frame.render_widget(
+        header(app).block(Block::new().padding(Padding::horizontal(2))),
+        top,
+    );
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(cap);
-    frame.render_widget(
-        capacity(app).block(
-            Block::bordered()
-                .border_style(DIM)
-                .title(Span::styled(" capacity ", KEY)),
-        ),
-        left,
-    );
-    frame.render_widget(
-        runner(app).block(
-            Block::bordered()
-                .border_style(DIM)
-                .title(Span::styled(" runner ", KEY)),
-        ),
-        right,
-    );
+    frame.render_widget(capacity(app).block(pad_block(" capacity ")), left);
+    frame.render_widget(runner(app).block(pad_block(" runner ")), right);
 
     frame.render_widget(
-        meters(app, met.width, cpu_rows).block(
-            Block::bordered()
-                .border_style(DIM)
-                .title(Span::styled(cpu_summary(app), KEY)),
-        ),
+        meters(app, inner_width(met.width), cpu_rows).block(pad_block(" cpu ")),
         met,
     );
-    frame.render_widget(
-        network(app).block(
-            Block::bordered()
-                .border_style(DIM)
-                .title(Span::styled(" network ", KEY)),
-        ),
-        net,
-    );
+    frame.render_widget(network(app).block(pad_block(" network ")), net);
     footer(frame, foot);
 }
 
@@ -339,12 +311,15 @@ fn footer(frame: &mut Frame, area: Rect) {
         return;
     }
     let line = Line::from(vec![
-        Span::styled(" q", KEY),
+        Span::styled("q", KEY),
         Span::styled(" quit   ", DIM),
         Span::styled("r", KEY),
         Span::styled(" refresh", DIM),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(
+        Paragraph::new(line).block(Block::new().padding(Padding::horizontal(2))),
+        area,
+    );
 }
 
 #[cfg(test)]
@@ -354,18 +329,48 @@ mod tests {
     #[test]
     fn bar_width_stays_within_bounds_at_any_terminal_size() {
         assert_eq!(bar_width(0), 8);
-        assert_eq!(bar_width(55), 8);
-        assert_eq!(bar_width(78), 23);
+        assert_eq!(bar_width(52), 8);
+        assert_eq!(bar_width(76), 24);
         assert_eq!(bar_width(300), 32);
     }
 
     #[test]
-    fn meter_line_fits_an_eighty_column_terminal() {
-        let w = bar_width(78);
-        let line = meter("cpu", Some(42), "1600 MHz  load 0.08 0.02 0.01".into(), w);
+    fn core_bars_consume_the_whole_inner_width() {
+        for total in [80u16, 96, 120, 200] {
+            let inner = inner_width(total);
+            let line = meter_owned(
+                "cpu_0".into(),
+                Some(42),
+                String::new(),
+                full_bar_width(inner),
+            );
+            assert_eq!(
+                line.width(),
+                inner as usize,
+                "core row does not fill inner width at total={total}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_core_row_without_a_sample_still_fills_the_width() {
+        let inner = inner_width(80);
+        let line = meter_owned("cpu_1".into(), None, String::new(), full_bar_width(inner));
+        assert_eq!(line.width(), inner as usize);
+    }
+
+    #[test]
+    fn labelled_rows_fit_an_eighty_column_terminal() {
+        let inner = inner_width(80);
+        let line = meter(
+            "ram",
+            Some(42),
+            "524.1 MiB / 3.6 GiB  cache 3.0 GiB".into(),
+            bar_width(inner),
+        );
         assert!(
-            line.width() <= 78,
-            "meter width {} exceeds 78",
+            line.width() <= inner as usize,
+            "ram row width {} exceeds inner {inner}",
             line.width()
         );
     }
@@ -403,8 +408,20 @@ mod tests {
     }
 
     #[test]
+    fn rows_carry_no_leading_space_since_padding_supplies_it() {
+        assert!(!kv("cpu", "x".into()).to_string().starts_with(' '));
+        assert!(
+            !meter_owned("cpu_0".into(), Some(1), String::new(), 8)
+                .to_string()
+                .starts_with(' ')
+        );
+    }
+
+    #[test]
     fn kv_keeps_a_separator_after_the_longest_key() {
-        for key in ["cpu", "ram", "disk", "tasks", "runner", "uptime", "last job"] {
+        for key in [
+            "cpu", "ram", "disk", "tasks", "runner", "uptime", "last job",
+        ] {
             let s = kv(key, "VALUE".into()).to_string();
             assert!(
                 s.contains(&format!("{key} ")),

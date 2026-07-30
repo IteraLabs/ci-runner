@@ -1,4 +1,68 @@
-use crate::probe::{Probe, parse_i64, read_u64};
+use crate::probe::{Probe, parse_i64, read_trimmed};
+
+pub fn fan_path() -> Option<String> {
+    if let Ok(dir) = std::fs::read_dir("/sys/class/hwmon") {
+        for e in dir.flatten() {
+            let p = e.path();
+            let is_fan = std::fs::read(p.join("name"))
+                .map(|n| n.starts_with(b"gpio_fan") || n.starts_with(b"pwm_fan"))
+                .unwrap_or(false);
+            if is_fan {
+                let pwm = p.join("pwm1");
+                if pwm.exists() {
+                    return Some(pwm.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    for i in 0..8 {
+        let base = format!("/sys/class/thermal/cooling_device{i}");
+        if read_trimmed(&format!("{base}/type")).is_some_and(|t| t.contains("fan")) {
+            return Some(format!("{base}/cur_state"));
+        }
+    }
+    None
+}
+
+pub struct Fan {
+    probe: Probe,
+    present: bool,
+    pub on: Option<bool>,
+}
+
+impl Default for Fan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Fan {
+    pub fn new() -> Self {
+        let path = fan_path();
+        Self {
+            probe: Probe::open(path.as_deref().unwrap_or("/nonexistent"), 32),
+            present: path.is_some(),
+            on: None,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        if !self.present {
+            return;
+        }
+        if self.probe.refresh() {
+            self.on = parse_i64(self.probe.data()).map(|v| v > 0);
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self.on {
+            Some(true) => "fan ON",
+            Some(false) => "fan OFF",
+            None => "fan --",
+        }
+    }
+}
 
 pub const WINDOW: usize = 4;
 pub const COLD: i64 = 30_000;
@@ -10,7 +74,6 @@ pub struct Therm {
     filled: usize,
     head: usize,
     pub milli_c: Option<i64>,
-    pub trip_milli_c: Option<i64>,
 }
 
 impl Default for Therm {
@@ -27,8 +90,6 @@ impl Therm {
             filled: 0,
             head: 0,
             milli_c: None,
-            trip_milli_c: read_u64("/sys/class/thermal/thermal_zone0/trip_point_0_temp")
-                .map(|v| v as i64),
         }
     }
 
@@ -103,6 +164,28 @@ mod tests {
         t.window = [0; WINDOW];
         feed(&mut t, &[10000, 10000, 10000, 10000, 20000]);
         assert_eq!(t.milli_c, Some((20000 + 10000 * 3) / 4));
+    }
+
+    #[test]
+    fn fan_label_reflects_state() {
+        let mut f = Fan::new();
+        f.on = Some(true);
+        assert_eq!(f.label(), "fan ON");
+        f.on = Some(false);
+        assert_eq!(f.label(), "fan OFF");
+        f.on = None;
+        assert_eq!(f.label(), "fan --");
+    }
+
+    #[test]
+    fn fan_is_discoverable_on_this_host_or_absent_cleanly() {
+        let mut f = Fan::new();
+        f.tick();
+        if f.present {
+            assert!(f.on.is_some(), "fan path found but no readable state");
+        } else {
+            assert_eq!(f.label(), "fan --");
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::host::{Host, Uptime};
 use crate::jobs::Jobs;
 use crate::mem::MemSource;
 use crate::net::NetSource;
-use crate::therm::Therm;
+use crate::therm::{Fan, Therm};
 
 pub struct App {
     pub host: Host,
@@ -13,6 +13,7 @@ pub struct App {
     pub mem: MemSource,
     pub net: NetSource,
     pub therm: Therm,
+    pub fan: Fan,
     pub jobs: Jobs,
     pub uptime: Uptime,
     pub ticks: u64,
@@ -27,6 +28,7 @@ impl App {
             mem: MemSource::new(),
             net: NetSource::new(),
             therm: Therm::new(),
+            fan: Fan::new(),
             jobs: Jobs::new(),
             uptime: Uptime::new(),
             ticks: 0,
@@ -42,6 +44,7 @@ impl App {
         self.mem.tick();
         self.net.tick(dt_ms);
         self.therm.tick();
+        self.fan.tick();
         self.jobs.tick();
         self.uptime.tick();
         self.ticks = self.ticks.saturating_add(1);

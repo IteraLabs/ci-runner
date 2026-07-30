@@ -25,7 +25,11 @@ fn parse_cpu_line(line: &[u8]) -> Option<CpuTimes> {
             idle = idle.saturating_add(v);
         }
     }
-    if total == 0 { None } else { Some(CpuTimes { total, idle }) }
+    if total == 0 {
+        None
+    } else {
+        Some(CpuTimes { total, idle })
+    }
 }
 
 pub fn parse_stat_all(data: &[u8], cores: &mut Vec<CpuTimes>) -> Option<CpuTimes> {
@@ -193,7 +197,10 @@ intr 1 2 3\n";
     #[test]
     fn parse_stat_all_clears_stale_cores_between_calls() {
         let mut cores = vec![CpuTimes { total: 9, idle: 9 }; 8];
-        parse_stat_all(b"cpu  10 0 10 100 80 0 0 0\ncpu0 1 0 1 10 8 0 0 0\n", &mut cores);
+        parse_stat_all(
+            b"cpu  10 0 10 100 80 0 0 0\ncpu0 1 0 1 10 8 0 0 0\n",
+            &mut cores,
+        );
         assert_eq!(cores.len(), 1);
     }
 
