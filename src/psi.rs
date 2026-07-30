@@ -102,6 +102,7 @@ full avg10=99.00 avg60=0.00 avg300=0.00 total=1\n";
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires a live Linux host")]
     fn all_three_resources_are_read_on_a_live_system() {
         let mut p = Psi::new();
         p.tick();

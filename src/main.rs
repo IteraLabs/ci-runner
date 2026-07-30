@@ -52,25 +52,38 @@ fn install_handlers() {
 
 const USAGE: &str = "usage: citop [interval_ms]\n\n\
      interval_ms  refresh period in milliseconds, minimum 100, default 1000\n\n\
+     -h, --help     print this message\n\
+     -V, --version  print version and target\n\n\
      keys: q or Esc quit, r refresh now";
 
 enum ArgError {
     Help,
+    Version,
+    Unknown,
     Invalid(&'static str),
 }
 
 fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Duration, ArgError> {
-    let mut ms = DEFAULT_MS;
+    let mut ms = None;
     for a in args {
         match a.as_str() {
             "-h" | "--help" => return Err(ArgError::Help),
-            _ => match a.parse::<u64>() {
-                Ok(v) if v >= MIN_MS => ms = v,
-                _ => return Err(ArgError::Invalid("interval_ms must be an integer >= 100")),
-            },
+            "-V" | "--version" => return Err(ArgError::Version),
+            s if s.starts_with('-') => return Err(ArgError::Unknown),
+            _ => {
+                if ms.is_some() {
+                    return Err(ArgError::Invalid("expected at most one interval_ms"));
+                }
+                match a.parse::<u64>() {
+                    Ok(v) if v >= MIN_MS => ms = Some(v),
+                    _ => {
+                        return Err(ArgError::Invalid("interval_ms must be an integer >= 100"));
+                    }
+                }
+            }
         }
     }
-    Ok(Duration::from_millis(ms))
+    Ok(Duration::from_millis(ms.unwrap_or(DEFAULT_MS)))
 }
 
 fn is_interactive() -> bool {
@@ -83,6 +96,20 @@ fn main() -> ExitCode {
         Err(ArgError::Help) => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
+        }
+        Err(ArgError::Version) => {
+            println!(
+                "citop {} {} {}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::ARCH,
+                std::env::consts::OS
+            );
+            return ExitCode::SUCCESS;
+        }
+        Err(ArgError::Unknown) => {
+            eprintln!("citop: unknown option, see --help");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
         }
         Err(ArgError::Invalid(msg)) => {
             eprintln!("citop: {msg}");
@@ -194,12 +221,34 @@ mod tests {
             parse_args(args(&["abc"])),
             Err(ArgError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn version_is_distinct_from_help_and_from_an_error() {
+        assert!(matches!(parse_args(args(&["-V"])), Err(ArgError::Version)));
         assert!(matches!(
-            parse_args(args(&["-5"])),
-            Err(ArgError::Invalid(_))
+            parse_args(args(&["--version"])),
+            Err(ArgError::Version)
         ));
+    }
+
+    #[test]
+    fn unknown_flags_report_as_flags_not_as_a_bad_interval() {
+        assert!(matches!(parse_args(args(&["-5"])), Err(ArgError::Unknown)));
         assert!(matches!(
             parse_args(args(&["--verbose"])),
+            Err(ArgError::Unknown)
+        ));
+        assert!(matches!(
+            parse_args(args(&["--no-color"])),
+            Err(ArgError::Unknown)
+        ));
+    }
+
+    #[test]
+    fn a_second_positional_is_rejected_rather_than_last_wins() {
+        assert!(matches!(
+            parse_args(args(&["500", "2000"])),
             Err(ArgError::Invalid(_))
         ));
     }

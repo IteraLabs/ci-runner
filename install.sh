@@ -5,11 +5,17 @@ REPO="${CITOP_REPO:-IteraLabs/citop}"
 PREFIX="${CITOP_PREFIX:-$HOME/.local/bin}"
 TAG="${CITOP_TAG:-latest}"
 
-target=$(uname -m)-unknown-linux-gnu
 case "$(uname -s)" in
   Linux) ;;
   *) echo "citop: Linux only, found $(uname -s)" >&2; exit 1 ;;
 esac
+
+case "$(uname -m)" in
+  aarch64|arm64) arch=aarch64 ;;
+  x86_64|amd64)  arch=x86_64 ;;
+  *) echo "citop: no prebuilt binary for $(uname -m); build with cargo install --git https://github.com/IteraLabs/citop --locked" >&2; exit 1 ;;
+esac
+target="${arch}-unknown-linux-gnu"
 
 if [ "$TAG" = latest ]; then
   base="https://github.com/${REPO}/releases/latest/download"
