@@ -16,6 +16,21 @@ pub fn bytes(n: u64) -> String {
     format!("{whole}.{tenth} {}", UNITS[i])
 }
 
+pub fn pair(a: u64, b: u64) -> String {
+    let m = a.max(b);
+    let mut i = 0usize;
+    let mut v = m;
+    while v >= 1024 && i < UNITS.len() - 1 {
+        v /= 1024;
+        i += 1;
+    }
+    if i == 0 {
+        return format!("{a}/{b} B");
+    }
+    let scale = 1u64 << (10 * i as u32);
+    format!("{}/{} {}", a / scale, b / scale, UNITS[i])
+}
+
 pub fn rate(bps: u64) -> String {
     format!("{}/s", bytes(bps))
 }
@@ -80,6 +95,21 @@ mod tests {
         assert_eq!(bytes(3_967_889_408), "3.6 GiB");
         assert_eq!(bytes(1u64 << 40), "1.0 TiB");
         assert_eq!(bytes(u64::MAX), "15.9 EiB");
+    }
+
+    #[test]
+    fn pair_shares_one_unit_chosen_by_the_larger_value() {
+        assert_eq!(pair(169_349_120, 170_401_792), "161/162 MiB");
+        assert_eq!(pair(0, 0), "0/0 B");
+        assert_eq!(pair(512, 2048), "0/2 KiB");
+        assert_eq!(pair(3_221_225_472, 4_294_967_296), "3/4 GiB");
+    }
+
+    #[test]
+    fn pair_is_shorter_than_two_separate_byte_strings() {
+        let a = 169_349_120u64;
+        let b = 170_401_792u64;
+        assert!(pair(a, b).len() < format!("{} peak {}", bytes(a), bytes(b)).len());
     }
 
     #[test]

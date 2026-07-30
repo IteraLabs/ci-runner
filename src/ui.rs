@@ -67,6 +67,10 @@ fn meter_owned(label: String, percent: Option<u16>, right: String, width: usize)
     Line::from(spans)
 }
 
+fn centi_opt(v: Option<u64>) -> String {
+    v.map(fmt::centi).unwrap_or_else(|| "--".into())
+}
+
 fn kv<'a>(key: &'a str, value: String) -> Line<'a> {
     Line::from(vec![
         Span::styled(format!("{key:<KEYW$}"), KEY),
@@ -121,16 +125,17 @@ fn capacity(app: &App) -> Paragraph<'_> {
             )
         })
         .unwrap_or_else(|| "--".into());
-    let tasks = app
-        .cpu
-        .load_avg
-        .map(|l| format!("{} runnable / {}", l.runnable, l.threads))
-        .unwrap_or_else(|| "--".into());
+    let psi = format!(
+        "cpu {} mem {} io {}",
+        centi_opt(app.psi.cpu_centi),
+        centi_opt(app.psi.mem_centi),
+        centi_opt(app.psi.io_centi)
+    );
     Paragraph::new(vec![
         kv("cpu", freq),
         kv("clock", clock),
         kv("load", load),
-        kv("tasks", tasks),
+        kv("psi", psi),
     ])
 }
 
@@ -147,11 +152,16 @@ fn runner(app: &App) -> Paragraph<'_> {
     ]);
     let up = app.uptime.secs.map(fmt::hms).unwrap_or_else(|| "--".into());
     let last = app.jobs.last_job.clone().unwrap_or_else(|| "never".into());
+    let res = match app.jobs.res {
+        Some(r) => format!("{}  {} pids", fmt::pair(r.mem, r.mem_peak), r.pids),
+        None => "--".into(),
+    };
     Paragraph::new(vec![
         s,
         kv("jobs", app.jobs.running.to_string()),
         kv("uptime", up),
         kv("last job", last),
+        kv("res", res),
     ])
 }
 
@@ -188,6 +198,19 @@ fn temp_section(app: &App, inner: u16) -> Paragraph<'_> {
             Span::styled(app.fan.label(), fan_style),
         ]),
         kv("fan-speed", app.fan.rpm_label()),
+        Line::from(vec![
+            Span::styled(format!("{:<KEYW$}", "throttle"), KEY),
+            Span::styled(
+                app.throttle.label(),
+                if app.throttle.active() {
+                    Style::new().fg(Color::Red)
+                } else if app.throttle.ever() {
+                    Style::new().fg(Color::Yellow)
+                } else {
+                    DIM
+                },
+            ),
+        ]),
     ])
 }
 
@@ -242,6 +265,19 @@ fn memory_section(app: &App, inner: u16) -> Paragraph<'_> {
         )),
         None => out.push(meter("disk", None, "unavailable".into(), w)),
     }
+    let io_right = format!(
+        "{}  rd {}  wr {}",
+        app.diskio.device(),
+        app.diskio
+            .read_bps
+            .map(fmt::rate)
+            .unwrap_or_else(|| "--".into()),
+        app.diskio
+            .write_bps
+            .map(fmt::rate)
+            .unwrap_or_else(|| "--".into())
+    );
+    out.push(meter("disk-io", app.diskio.util, io_right, w));
     Paragraph::new(out)
 }
 
@@ -268,9 +304,27 @@ fn iface_line<'a>(slot: &'a str, i: Option<&'a crate::net::Iface>) -> Line<'a> {
         Span::styled(format!("{:<5}", i.state), state_style),
         Span::styled(format!("{link:>7}  "), DIM),
         Span::styled("rx ", DIM),
-        Span::raw(format!("{rx:>12}  ")),
+        Span::raw(format!("{rx:>11}  ")),
         Span::styled("tx ", DIM),
-        Span::raw(format!("{tx:>12}")),
+        Span::raw(format!("{tx:>11}")),
+        Span::styled("  err ", DIM),
+        Span::styled(
+            i.errs.to_string(),
+            if i.errs > 0 {
+                Style::new().fg(Color::Red)
+            } else {
+                DIM
+            },
+        ),
+        Span::styled(" drop ", DIM),
+        Span::styled(
+            i.drops.to_string(),
+            if i.drops > 0 {
+                Style::new().fg(Color::Yellow)
+            } else {
+                DIM
+            },
+        ),
     ])
 }
 
@@ -281,16 +335,35 @@ fn network(app: &App) -> Paragraph<'_> {
     ])
 }
 
-pub const FIXED_ROWS: u16 = 20;
+pub const CAPACITY_ROWS: u16 = 4;
+pub const RUNNER_ROWS: u16 = 5;
+pub const TEMP_ROWS: usize = 4;
+pub const MEMORY_ROWS: u16 = 4;
+pub const NETWORK_ROWS: u16 = 2;
+pub const HEADER_FULL: u16 = 3;
+pub const HEADER_MIN: u16 = 1;
+
+pub fn fixed_rows() -> u16 {
+    let row1 = CAPACITY_ROWS.max(RUNNER_ROWS) + 2;
+    let row3 = MEMORY_ROWS + 2;
+    let row4 = NETWORK_ROWS + 2;
+    row1 + row3 + row4
+}
 
 pub fn cpu_rows_for(height: u16, cores: usize) -> usize {
     if cores <= 1 {
         return 1;
     }
-    if height >= FIXED_ROWS + cores as u16 {
-        cores
+    let need = |n: usize| HEADER_MIN + fixed_rows() + n.max(TEMP_ROWS) as u16 + 2;
+    if height >= need(cores) { cores } else { 1 }
+}
+
+pub fn header_rows_for(height: u16, cpu_rows: usize) -> u16 {
+    let body = fixed_rows() + cpu_rows.max(TEMP_ROWS) as u16 + 2;
+    if height >= body + HEADER_FULL {
+        HEADER_FULL
     } else {
-        1
+        HEADER_MIN
     }
 }
 
@@ -298,14 +371,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let cores = app.cpu.per_core.len().max(app.host.cores);
     let cpu_rows = cpu_rows_for(area.height, cores);
-    let mid = cpu_rows.max(3) as u16 + 2;
+    let mid = cpu_rows.max(TEMP_ROWS) as u16 + 2;
 
     let [top, row1, row2, row3, row4, foot] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(6),
+        Constraint::Length(header_rows_for(area.height, cpu_rows)),
+        Constraint::Length(CAPACITY_ROWS.max(RUNNER_ROWS) + 2),
         Constraint::Length(mid),
-        Constraint::Length(5),
-        Constraint::Length(4),
+        Constraint::Length(MEMORY_ROWS + 2),
+        Constraint::Length(NETWORK_ROWS + 2),
         Constraint::Min(0),
     ])
     .areas(area);
@@ -358,18 +431,21 @@ fn footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
 
-    const ALL_KEYS: [&str; 12] = [
+    const ALL_KEYS: [&str; 15] = [
         "cpu",
         "clock",
         "load",
-        "tasks",
+        "psi",
         "runner",
         "jobs",
         "uptime",
         "last job",
+        "res",
         "cpu-temp",
         "fan",
         "fan-speed",
+        "throttle",
+        "disk-io",
         "wlan0",
     ];
 
@@ -437,9 +513,24 @@ mod tests {
 
     #[test]
     fn per_core_rows_collapse_to_aggregate_when_too_short() {
-        assert_eq!(cpu_rows_for(23, 4), 1);
         assert_eq!(cpu_rows_for(10, 4), 1);
-        assert_eq!(cpu_rows_for(24, 8), 1);
+        assert_eq!(cpu_rows_for(27, 8), 1);
+    }
+
+    #[test]
+    fn the_whole_layout_fits_eighty_by_twenty_four() {
+        let cpu_rows = cpu_rows_for(24, 4);
+        assert_eq!(cpu_rows, 4, "all four cores must still be shown at 80x24");
+        let total =
+            header_rows_for(24, cpu_rows) + fixed_rows() + cpu_rows.max(TEMP_ROWS) as u16 + 2;
+        assert!(total <= 24, "layout needs {total} rows, only 24 available");
+    }
+
+    #[test]
+    fn the_header_expands_when_there_is_room() {
+        assert_eq!(header_rows_for(24, 4), HEADER_MIN);
+        assert_eq!(header_rows_for(26, 4), HEADER_FULL);
+        assert_eq!(header_rows_for(40, 4), HEADER_FULL);
     }
 
     #[test]

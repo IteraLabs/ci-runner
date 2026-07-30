@@ -6,6 +6,7 @@ mod jobs;
 mod mem;
 mod net;
 mod probe;
+mod psi;
 mod therm;
 mod ui;
 

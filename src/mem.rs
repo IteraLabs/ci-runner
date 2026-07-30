@@ -1,4 +1,4 @@
-use crate::probe::{Probe, lines, parse_u64};
+use crate::probe::{Probe, fields, lines, parse_u64};
 
 #[derive(Clone, Copy, Default)]
 pub struct MemInfo {
@@ -94,6 +94,131 @@ pub fn statvfs_root() -> Option<Disk> {
     })
 }
 
+pub const SECTOR: u64 = 512;
+
+pub fn root_disk_name() -> Option<String> {
+    let mounts = std::fs::read("/proc/mounts").ok()?;
+    for line in lines(&mounts) {
+        let mut it = fields(line);
+        let dev = it.next()?;
+        let mnt = it.next()?;
+        if mnt != b"/" {
+            continue;
+        }
+        let dev = std::str::from_utf8(dev).ok()?;
+        let base = dev.rsplit('/').next()?;
+        return Some(strip_partition(base));
+    }
+    None
+}
+
+pub fn strip_partition(name: &str) -> String {
+    let b = name.as_bytes();
+    let mut end = b.len();
+    while end > 0 && b[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    if end > 0 && end < b.len() && b[end - 1] == b'p' && b[..end - 1].iter().any(u8::is_ascii_digit)
+    {
+        end -= 1;
+    }
+    if end == 0 {
+        name.to_string()
+    } else {
+        name[..end].to_string()
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskCounters {
+    pub read_sectors: u64,
+    pub write_sectors: u64,
+    pub io_ms: u64,
+}
+
+pub fn parse_diskstats(data: &[u8], want: &str) -> Option<DiskCounters> {
+    for line in lines(data) {
+        let mut it = fields(line);
+        let _major = it.next()?;
+        let _minor = it.next()?;
+        if it.next()? != want.as_bytes() {
+            continue;
+        }
+        let v: Vec<u64> = it.take(10).filter_map(parse_u64).collect();
+        if v.len() < 10 {
+            return None;
+        }
+        return Some(DiskCounters {
+            read_sectors: v[2],
+            write_sectors: v[6],
+            io_ms: v[9],
+        });
+    }
+    None
+}
+
+pub struct DiskIo {
+    probe: Probe,
+    name: Option<String>,
+    prev: Option<DiskCounters>,
+    pub read_bps: Option<u64>,
+    pub write_bps: Option<u64>,
+    pub util: Option<u16>,
+}
+
+impl Default for DiskIo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DiskIo {
+    pub fn new() -> Self {
+        Self {
+            probe: Probe::open("/proc/diskstats", 16384),
+            name: root_disk_name(),
+            prev: None,
+            read_bps: None,
+            write_bps: None,
+            util: None,
+        }
+    }
+
+    pub fn device(&self) -> &str {
+        self.name.as_deref().unwrap_or("--")
+    }
+
+    pub fn tick(&mut self, dt_ms: u64) {
+        let Some(name) = self.name.as_deref() else {
+            return;
+        };
+        if !self.probe.refresh() {
+            return;
+        }
+        let Some(cur) = parse_diskstats(self.probe.data(), name) else {
+            return;
+        };
+        if let Some(p) = self.prev {
+            if dt_ms == 0
+                || cur.read_sectors < p.read_sectors
+                || cur.write_sectors < p.write_sectors
+            {
+                self.read_bps = None;
+                self.write_bps = None;
+                self.util = None;
+            } else {
+                let rd = (cur.read_sectors - p.read_sectors).saturating_mul(SECTOR);
+                let wr = (cur.write_sectors - p.write_sectors).saturating_mul(SECTOR);
+                self.read_bps = Some(rd.saturating_mul(1000) / dt_ms);
+                self.write_bps = Some(wr.saturating_mul(1000) / dt_ms);
+                let busy = cur.io_ms.saturating_sub(p.io_ms);
+                self.util = Some(crate::fmt::pct(busy, dt_ms));
+            }
+        }
+        self.prev = Some(cur);
+    }
+}
+
 pub struct MemSource {
     meminfo: Probe,
     pub info: Option<MemInfo>,
@@ -183,6 +308,52 @@ SwapFree:        8388604 kB\n";
     fn parse_meminfo_requires_memtotal() {
         assert!(parse_meminfo(b"MemFree: 12 kB\n").is_none());
         assert!(parse_meminfo(b"").is_none());
+    }
+
+    const DISKSTATS: &[u8] = b" 179       0 mmcblk0 73808 14004 10649174 274785 22425 34199 2609932 740017 0 213246 1014803 0 0 0 0 0 0\n 179       2 mmcblk0p2 73000 14000 10000000 270000 22000 34000 2600000 740000 0 213000 1014000 0 0 0 0 0 0\n";
+
+    #[test]
+    fn strip_partition_handles_mmc_nvme_and_sata() {
+        assert_eq!(strip_partition("mmcblk0p2"), "mmcblk0");
+        assert_eq!(strip_partition("nvme0n1p2"), "nvme0n1");
+        assert_eq!(strip_partition("sda1"), "sda");
+        assert_eq!(strip_partition("sda"), "sda");
+        assert_eq!(strip_partition("vda15"), "vda");
+    }
+
+    #[test]
+    fn parse_diskstats_reads_the_whole_disk_not_the_partition() {
+        let c = parse_diskstats(DISKSTATS, "mmcblk0").unwrap();
+        assert_eq!(c.read_sectors, 10_649_174);
+        assert_eq!(c.write_sectors, 2_609_932);
+        assert_eq!(c.io_ms, 213_246);
+    }
+
+    #[test]
+    fn parse_diskstats_returns_none_for_an_absent_device() {
+        assert!(parse_diskstats(DISKSTATS, "sda").is_none());
+        assert!(parse_diskstats(b"", "mmcblk0").is_none());
+    }
+
+    #[test]
+    fn disk_io_first_tick_has_no_rate() {
+        let mut d = DiskIo {
+            probe: Probe::open("/nonexistent", 16),
+            name: Some("mmcblk0".into()),
+            prev: None,
+            read_bps: None,
+            write_bps: None,
+            util: None,
+        };
+        d.prev = parse_diskstats(DISKSTATS, "mmcblk0");
+        assert_eq!(d.read_bps, None);
+    }
+
+    #[test]
+    fn root_disk_resolves_on_a_live_system() {
+        let n = root_disk_name().expect("root device must resolve");
+        assert!(!n.is_empty());
+        assert!(!n.ends_with(|c: char| c.is_ascii_digit() && n.len() > 3 && n.contains('p')));
     }
 
     #[test]

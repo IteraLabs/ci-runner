@@ -1,4 +1,4 @@
-use crate::probe::{Probe, fields, lines, parse_u64};
+use crate::probe::{Probe, fields, lines, parse_centi, parse_u64};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CpuTimes {
@@ -11,8 +11,6 @@ pub struct Load {
     pub one: u64,
     pub five: u64,
     pub fifteen: u64,
-    pub runnable: u64,
-    pub threads: u64,
 }
 
 fn parse_cpu_line(line: &[u8]) -> Option<CpuTimes> {
@@ -63,14 +61,6 @@ pub fn busy_percent(prev: CpuTimes, cur: CpuTimes) -> Option<u16> {
     Some(crate::fmt::pct(busy, dt))
 }
 
-fn parse_centi(f: &[u8]) -> Option<u64> {
-    let dot = f.iter().position(|&b| b == b'.')?;
-    let whole = parse_u64(&f[..dot])?;
-    let frac = f.get(dot + 1..dot + 3)?;
-    let cents = parse_u64(frac)?;
-    whole.checked_mul(100)?.checked_add(cents)
-}
-
 pub fn parse_loadavg(data: &[u8]) -> Option<Load> {
     let line = lines(data).next()?;
     let mut it = fields(line);
@@ -79,15 +69,9 @@ pub fn parse_loadavg(data: &[u8]) -> Option<Load> {
     let fifteen = parse_centi(it.next()?)?;
     let procs = it.next()?;
     let slash = procs.iter().position(|&b| b == b'/')?;
-    let runnable = parse_u64(&procs[..slash])?;
-    let threads = parse_u64(&procs[slash + 1..])?;
-    Some(Load {
-        one,
-        five,
-        fifteen,
-        runnable,
-        threads,
-    })
+    parse_u64(&procs[..slash])?;
+    parse_u64(&procs[slash + 1..])?;
+    Some(Load { one, five, fifteen })
 }
 
 pub struct CpuSource {
@@ -262,8 +246,6 @@ intr 1 2 3\n";
         assert_eq!(l.one, 8);
         assert_eq!(l.five, 2);
         assert_eq!(l.fifteen, 234);
-        assert_eq!(l.runnable, 7);
-        assert_eq!(l.threads, 257);
     }
 
     #[test]

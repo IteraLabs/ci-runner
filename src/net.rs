@@ -1,26 +1,34 @@
 use crate::probe::{Probe, fields, lines, parse_i64, parse_u64, read_trimmed};
 
-pub const RX: usize = 0;
-pub const TX: usize = 8;
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+pub struct Counters {
+    pub rx: u64,
+    pub tx: u64,
+    pub errs: u64,
+    pub drops: u64,
+}
 
-pub fn parse_net_dev(data: &[u8], want: &str) -> Option<(u64, u64)> {
+pub fn parse_net_dev(data: &[u8], want: &str) -> Option<Counters> {
     for line in lines(data).skip(2) {
         let colon = line.iter().position(|&b| b == b':')?;
         let name = std::str::from_utf8(&line[..colon]).ok()?.trim();
         if name != want {
             continue;
         }
-        let mut rx = None;
-        let mut tx = None;
-        for (i, f) in fields(&line[colon + 1..]).enumerate() {
-            if i == RX {
-                rx = parse_u64(f);
-            } else if i == TX {
-                tx = parse_u64(f);
-                break;
-            }
+        let v: Vec<u64> = fields(&line[colon + 1..])
+            .take(12)
+            .filter_map(parse_u64)
+            .collect();
+        if v.len() < 12 {
+            return None;
         }
-        return Some((rx?, tx?));
+        return Some(Counters {
+            rx: v[0],
+            tx: v[8],
+            errs: v[2] + v[10],
+            drops: v[3] + v[11],
+        });
     }
     None
 }
@@ -80,8 +88,10 @@ pub struct Iface {
     pub state: String,
     pub rx_rate: Option<u64>,
     pub tx_rate: Option<u64>,
+    pub errs: u64,
+    pub drops: u64,
     pub present: bool,
-    prev: Option<(u64, u64)>,
+    prev: Option<Counters>,
 }
 
 impl Iface {
@@ -92,6 +102,8 @@ impl Iface {
             name,
             rx_rate: None,
             tx_rate: None,
+            errs: 0,
+            drops: 0,
             present: true,
             prev: None,
         }
@@ -106,13 +118,15 @@ impl Iface {
             return;
         };
         self.present = true;
+        self.errs = cur.errs;
+        self.drops = cur.drops;
         if let Some(prev) = self.prev {
-            if cur.0 < prev.0 || cur.1 < prev.1 || dt_ms == 0 {
+            if cur.rx < prev.rx || cur.tx < prev.tx || dt_ms == 0 {
                 self.rx_rate = None;
                 self.tx_rate = None;
             } else {
-                self.rx_rate = Some((cur.0 - prev.0).saturating_mul(1000) / dt_ms);
-                self.tx_rate = Some((cur.1 - prev.1).saturating_mul(1000) / dt_ms);
+                self.rx_rate = Some((cur.rx - prev.rx).saturating_mul(1000) / dt_ms);
+                self.tx_rate = Some((cur.tx - prev.tx).saturating_mul(1000) / dt_ms);
             }
         }
         self.prev = Some(cur);
@@ -176,13 +190,25 @@ docker0:       0       0    0    0    0     0          0         0        0     
 
     #[test]
     fn parse_net_dev_picks_rx_and_tx_bytes_by_column() {
-        assert_eq!(parse_net_dev(DEV, "eth0"), Some((2_645_248, 338_186)));
-        assert_eq!(parse_net_dev(DEV, "wlan0"), Some((1_235_004, 64_509)));
+        let e = parse_net_dev(DEV, "eth0").unwrap();
+        assert_eq!((e.rx, e.tx), (2_645_248, 338_186));
+        let w = parse_net_dev(DEV, "wlan0").unwrap();
+        assert_eq!((w.rx, w.tx), (1_235_004, 64_509));
     }
 
     #[test]
     fn parse_net_dev_handles_a_name_that_abuts_its_colon() {
-        assert_eq!(parse_net_dev(DEV, "docker0"), Some((0, 0)));
+        let d = parse_net_dev(DEV, "docker0").unwrap();
+        assert_eq!((d.rx, d.tx), (0, 0));
+    }
+
+    #[test]
+    fn parse_net_dev_sums_rx_and_tx_errors_and_drops() {
+        let e = parse_net_dev(DEV, "eth0").unwrap();
+        assert_eq!(e.drops, 18533);
+        assert_eq!(e.errs, 0);
+        let w = parse_net_dev(DEV, "wlan0").unwrap();
+        assert_eq!(w.drops, 0);
     }
 
     #[test]
@@ -205,6 +231,8 @@ docker0:       0       0    0    0    0     0          0         0        0     
             state: "up".into(),
             rx_rate: None,
             tx_rate: None,
+            errs: 0,
+            drops: 0,
             present: true,
             prev: None,
         };
@@ -221,8 +249,15 @@ docker0:       0       0    0    0    0     0          0         0        0     
             state: "up".into(),
             rx_rate: None,
             tx_rate: None,
+            errs: 0,
+            drops: 0,
             present: true,
-            prev: Some((2_645_248 - 2000, 338_186 - 500)),
+            prev: Some(Counters {
+                rx: 2_645_248 - 2000,
+                tx: 338_186 - 500,
+                errs: 0,
+                drops: 0,
+            }),
         };
         i.update(DEV, 2000);
         assert_eq!(i.rx_rate, Some(1000));
@@ -237,8 +272,15 @@ docker0:       0       0    0    0    0     0          0         0        0     
             state: "up".into(),
             rx_rate: Some(1),
             tx_rate: Some(1),
+            errs: 0,
+            drops: 0,
             present: true,
-            prev: Some((9_999_999_999, 9_999_999_999)),
+            prev: Some(Counters {
+                rx: 9_999_999_999,
+                tx: 9_999_999_999,
+                errs: 0,
+                drops: 0,
+            }),
         };
         i.update(DEV, 1000);
         assert_eq!(i.rx_rate, None);
@@ -253,8 +295,15 @@ docker0:       0       0    0    0    0     0          0         0        0     
             state: "up".into(),
             rx_rate: Some(5),
             tx_rate: Some(5),
+            errs: 0,
+            drops: 0,
             present: true,
-            prev: Some((1, 1)),
+            prev: Some(Counters {
+                rx: 1,
+                tx: 1,
+                errs: 0,
+                drops: 0,
+            }),
         };
         i.update(DEV, 1000);
         assert!(!i.present);
@@ -269,8 +318,15 @@ docker0:       0       0    0    0    0     0          0         0        0     
             state: "up".into(),
             rx_rate: None,
             tx_rate: None,
+            errs: 0,
+            drops: 0,
             present: true,
-            prev: Some((0, 0)),
+            prev: Some(Counters {
+                rx: 0,
+                tx: 0,
+                errs: 0,
+                drops: 0,
+            }),
         };
         i.update(DEV, 0);
         assert_eq!(i.rx_rate, None);

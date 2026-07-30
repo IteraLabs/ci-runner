@@ -62,6 +62,30 @@ pub fn parse_i64(s: &[u8]) -> Option<i64> {
     }
 }
 
+pub fn parse_hex(s: &[u8]) -> Option<u64> {
+    let mut v: u64 = 0;
+    let mut seen = false;
+    for &b in s {
+        let d = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => break,
+        };
+        v = v.checked_mul(16)?.checked_add(d as u64)?;
+        seen = true;
+    }
+    if seen { Some(v) } else { None }
+}
+
+pub fn parse_centi(f: &[u8]) -> Option<u64> {
+    let dot = f.iter().position(|&b| b == b'.')?;
+    let whole = parse_u64(&f[..dot])?;
+    let frac = f.get(dot + 1..dot + 3)?;
+    let cents = parse_u64(frac)?;
+    whole.checked_mul(100)?.checked_add(cents)
+}
+
 pub fn fields(line: &[u8]) -> impl Iterator<Item = &[u8]> {
     line.split(|b| b.is_ascii_whitespace())
         .filter(|f| !f.is_empty())
@@ -108,6 +132,25 @@ mod tests {
     fn parse_i64_handles_the_negative_speed_sentinel() {
         assert_eq!(parse_i64(b"-1\n"), Some(-1));
         assert_eq!(parse_i64(b"100\n"), Some(100));
+    }
+
+    #[test]
+    fn parse_hex_reads_the_throttle_bitmask() {
+        assert_eq!(parse_hex(b"0\n"), Some(0));
+        assert_eq!(parse_hex(b"50005\n"), Some(0x50005));
+        assert_eq!(parse_hex(b"ffff\n"), Some(0xffff));
+        assert_eq!(parse_hex(b"FFFF\n"), Some(0xffff));
+        assert!(parse_hex(b"").is_none());
+        assert!(parse_hex(b"zz").is_none());
+    }
+
+    #[test]
+    fn parse_centi_reads_two_decimal_places() {
+        assert_eq!(parse_centi(b"0.00"), Some(0));
+        assert_eq!(parse_centi(b"2.34"), Some(234));
+        assert_eq!(parse_centi(b"100.00"), Some(10000));
+        assert!(parse_centi(b"12").is_none());
+        assert!(parse_centi(b"1.2").is_none());
     }
 
     #[test]

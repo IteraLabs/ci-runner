@@ -1,4 +1,4 @@
-use crate::probe::{lines, parse_u64};
+use crate::probe::{lines, parse_u64, read_u64};
 
 pub const WORKER: &str = "Runner.Worker";
 pub const LISTENER: &str = "Runner.Listener";
@@ -53,7 +53,7 @@ pub fn parse_cgroup_path(data: &[u8]) -> Option<String> {
             if s.is_empty() || s == "/" {
                 return None;
             }
-            return Some(format!("/sys/fs/cgroup{s}/cgroup.procs"));
+            return Some(format!("/sys/fs/cgroup{s}"));
         }
     }
     None
@@ -88,12 +88,20 @@ fn scan_proc() -> (u32, bool, Option<u64>) {
     (workers, listener.is_some(), listener)
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct Res {
+    pub mem: u64,
+    pub mem_peak: u64,
+    pub pids: u64,
+}
+
 pub struct Jobs {
     cgroup: Option<String>,
     root: Option<String>,
     pub running: u32,
     pub listener: bool,
     pub last_job: Option<String>,
+    pub res: Option<Res>,
     countdown: u8,
     log_countdown: u8,
 }
@@ -115,11 +123,13 @@ impl Jobs {
             running: 0,
             listener: false,
             last_job: None,
+            res: None,
             countdown: 0,
             log_countdown: 0,
         };
         j.bootstrap();
         j.refresh_last_job();
+        j.read_res();
         j
     }
 
@@ -130,7 +140,7 @@ impl Jobs {
         self.cgroup = pid
             .and_then(|p| std::fs::read(format!("/proc/{p}/cgroup")).ok())
             .and_then(|d| parse_cgroup_path(&d))
-            .filter(|p| std::path::Path::new(p).exists());
+            .filter(|p| std::path::Path::new(&format!("{p}/cgroup.procs")).exists());
         self.root = pid
             .and_then(|p| std::fs::read_link(format!("/proc/{p}/cwd")).ok())
             .map(|p| p.to_string_lossy().into_owned());
@@ -148,8 +158,20 @@ impl Jobs {
         }
     }
 
+    fn read_res(&mut self) {
+        let Some(dir) = self.cgroup.as_deref() else {
+            return;
+        };
+        let g = |f: &str| read_u64(&format!("{dir}/{f}"));
+        self.res = g("memory.current").map(|mem| Res {
+            mem,
+            mem_peak: g("memory.peak").unwrap_or(mem),
+            pids: g("pids.current").unwrap_or(0),
+        });
+    }
+
     fn count_via_cgroup(&self) -> Option<(u32, bool)> {
-        let raw = std::fs::read(self.cgroup.as_ref()?).ok()?;
+        let raw = std::fs::read(format!("{}/cgroup.procs", self.cgroup.as_ref()?)).ok()?;
         let mut workers = 0u32;
         let mut listener = false;
         for line in lines(&raw) {
@@ -187,6 +209,7 @@ impl Jobs {
         if before > 0 && self.running == 0 {
             self.refresh_last_job();
         }
+        self.read_res();
     }
 
     pub fn state(&self) -> &'static str {
@@ -230,7 +253,7 @@ mod tests {
         let d = b"0::/system.slice/actions.runner.IteraLabs.circadian-runner.service\n";
         assert_eq!(
             parse_cgroup_path(d).unwrap(),
-            "/sys/fs/cgroup/system.slice/actions.runner.IteraLabs.circadian-runner.service/cgroup.procs"
+            "/sys/fs/cgroup/system.slice/actions.runner.IteraLabs.circadian-runner.service"
         );
     }
 
@@ -281,6 +304,7 @@ mod tests {
             running: 0,
             listener: false,
             last_job: None,
+            res: None,
             countdown: 0,
             log_countdown: 0,
         };

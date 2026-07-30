@@ -1,4 +1,4 @@
-use crate::probe::{Probe, parse_i64, read_trimmed};
+use crate::probe::{Probe, parse_hex, parse_i64, read_trimmed};
 
 pub fn fan_paths() -> (Option<String>, Option<String>) {
     if let Ok(dir) = std::fs::read_dir("/sys/class/hwmon") {
@@ -78,6 +78,90 @@ impl Fan {
             Some(r) => format!("{r} RPM"),
             None => "N/A".into(),
         }
+    }
+}
+
+pub const THROTTLE_PATH: &str = "/sys/devices/platform/soc/soc:firmware/get_throttled";
+
+pub const NOW_FLAGS: [(u32, &str); 4] = [
+    (0, "uvolt"),
+    (1, "capped"),
+    (2, "throttled"),
+    (3, "softtemp"),
+];
+
+pub fn describe_throttle(bits: u64) -> String {
+    let now: Vec<&str> = NOW_FLAGS
+        .iter()
+        .filter(|(b, _)| bits & (1 << b) != 0)
+        .map(|(_, n)| *n)
+        .collect();
+    let ever: Vec<&str> = NOW_FLAGS
+        .iter()
+        .filter(|(b, _)| bits & (1 << (b + 16)) != 0)
+        .map(|(_, n)| *n)
+        .collect();
+    match (now.is_empty(), ever.is_empty()) {
+        (true, true) => "none".into(),
+        (true, false) => format!("was {}", ever.join(" ")),
+        (false, true) => now.join(" "),
+        (false, false) => format!("{} (was {})", now.join(" "), ever.join(" ")),
+    }
+}
+
+pub struct Throttle {
+    probe: Probe,
+    present: bool,
+    pub bits: Option<u64>,
+    countdown: u8,
+}
+
+const THROTTLE_EVERY: u8 = 5;
+
+impl Default for Throttle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Throttle {
+    pub fn new() -> Self {
+        let present = std::path::Path::new(THROTTLE_PATH).exists();
+        Self {
+            probe: Probe::open(THROTTLE_PATH, 32),
+            present,
+            bits: None,
+            countdown: 0,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        if !self.present {
+            return;
+        }
+        if self.countdown > 0 {
+            self.countdown -= 1;
+            return;
+        }
+        self.countdown = THROTTLE_EVERY;
+        if self.probe.refresh() {
+            self.bits = parse_hex(self.probe.data());
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self.bits {
+            Some(b) => describe_throttle(b),
+            None => "N/A".into(),
+        }
+    }
+
+    pub fn active(&self) -> bool {
+        self.bits.is_some_and(|b| b & 0xf != 0)
+    }
+
+    pub fn ever(&self) -> bool {
+        self.bits.is_some_and(|b| b & 0xf0000 != 0)
     }
 }
 
@@ -181,6 +265,49 @@ mod tests {
         t.window = [0; WINDOW];
         feed(&mut t, &[10000, 10000, 10000, 10000, 20000]);
         assert_eq!(t.milli_c, Some((20000 + 10000 * 3) / 4));
+    }
+
+    #[test]
+    fn throttle_decodes_the_raspberry_pi_bitmask() {
+        assert_eq!(describe_throttle(0), "none");
+        assert_eq!(describe_throttle(0x1), "uvolt");
+        assert_eq!(describe_throttle(0x4), "throttled");
+        assert_eq!(describe_throttle(0xf), "uvolt capped throttled softtemp");
+    }
+
+    #[test]
+    fn throttle_separates_current_from_since_boot() {
+        assert_eq!(describe_throttle(0x10000), "was uvolt");
+        assert_eq!(describe_throttle(0x50000), "was uvolt throttled");
+        assert_eq!(
+            describe_throttle(0x50005),
+            "uvolt throttled (was uvolt throttled)"
+        );
+    }
+
+    #[test]
+    fn throttle_active_and_ever_are_distinct() {
+        let mut t = Throttle::new();
+        t.bits = Some(0x50000);
+        assert!(!t.active());
+        assert!(t.ever());
+        t.bits = Some(0x1);
+        assert!(t.active());
+        assert!(!t.ever());
+        t.bits = Some(0);
+        assert!(!t.active());
+        assert!(!t.ever());
+    }
+
+    #[test]
+    fn throttle_reads_zero_on_a_healthy_host() {
+        let mut t = Throttle::new();
+        t.tick();
+        if t.present {
+            assert!(t.bits.is_some(), "throttle node present but unreadable");
+        } else {
+            assert_eq!(t.label(), "N/A");
+        }
     }
 
     #[test]
