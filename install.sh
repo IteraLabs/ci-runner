@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${CITOP_REPO:-IteraLabs/ci-runner}"
+REPO="${CITOP_REPO:-IteraLabs/citop}"
 PREFIX="${CITOP_PREFIX:-$HOME/.local/bin}"
 TAG="${CITOP_TAG:-latest}"
 

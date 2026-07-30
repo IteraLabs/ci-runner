@@ -1,8 +1,4 @@
-# ci-runner
-
-Terminal UI and other Tools for self-hosted CI jobs running on small devices.
-
-## citop
+# citop
 
 Single-binary terminal dashboard for a self-hosted GitHub Actions runner. Reads
 `/proc` and `/sys` directly. No network access, no child processes, no writes.
@@ -104,7 +100,7 @@ with `pread` at offset 0.
 ### From a release
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IteraLabs/ci-runner/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/IteraLabs/citop/main/install.sh | sh
 ```
 
 Downloads the binary for your architecture, verifies its SHA-256 against the
@@ -114,22 +110,22 @@ published checksum, and installs to `~/.local/bin/citop`. Override with
 The same by hand:
 
 ```bash
-curl -fsSLO https://github.com/IteraLabs/ci-runner/releases/latest/download/citop-aarch64-unknown-linux-gnu
-curl -fsSLO https://github.com/IteraLabs/ci-runner/releases/latest/download/citop-aarch64-unknown-linux-gnu.sha256
+curl -fsSLO https://github.com/IteraLabs/citop/releases/latest/download/citop-aarch64-unknown-linux-gnu
+curl -fsSLO https://github.com/IteraLabs/citop/releases/latest/download/citop-aarch64-unknown-linux-gnu.sha256
 sha256sum -c citop-aarch64-unknown-linux-gnu.sha256
 ```
 
 ### From source
 
 ```bash
-cargo install --git https://github.com/IteraLabs/ci-runner
+cargo install --git https://github.com/IteraLabs/citop
 ```
 
 ### Clone and run
 
 ```bash
-git clone https://github.com/IteraLabs/ci-runner
-cd ci-runner
+git clone https://github.com/IteraLabs/citop
+cd citop
 cargo build --release
 ./target/release/citop
 ```
@@ -235,7 +231,7 @@ Releases are built by `.github/workflows/release.yml` and carry a signed SLSA
 provenance attestation naming the commit and workflow that produced them:
 
 ```bash
-gh attestation verify citop-aarch64-unknown-linux-gnu --repo IteraLabs/ci-runner
+gh attestation verify citop-aarch64-unknown-linux-gnu --repo IteraLabs/citop
 ```
 
 ### 5. Reproduce the binary yourself
@@ -243,8 +239,8 @@ gh attestation verify citop-aarch64-unknown-linux-gnu --repo IteraLabs/ci-runner
 The highest-trust path is to not use a published binary at all:
 
 ```bash
-git clone https://github.com/IteraLabs/ci-runner
-cd ci-runner && cargo build --release --locked
+git clone https://github.com/IteraLabs/citop
+cd citop && cargo build --release --locked
 sha256sum target/release/citop
 ```
 

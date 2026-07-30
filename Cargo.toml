@@ -1,20 +1,17 @@
 [package]
-name = "ci-runner"
+name = "citop"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"
 description = "Lightweight terminal dashboard for self-hosted CI runners on small devices"
-repository = "https://github.com/IteraLabs/ci-runner"
+repository = "https://github.com/IteraLabs/citop"
 readme = "README.md"
 keywords = ["tui", "monitoring", "ci", "runner", "raspberry-pi"]
 categories = ["command-line-utilities", "os::linux-apis"]
 exclude = [".github/", ".gitignore"]
 publish = false
 
-[[bin]]
-name = "citop"
-path = "src/main.rs"
 
 [dependencies]
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }

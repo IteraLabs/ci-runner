@@ -105,7 +105,7 @@ fn main() -> ExitCode {
 }
 
 fn event_loop(terminal: &mut DefaultTerminal, tick: Duration) -> io::Result<()> {
-    let mut app = App::new();
+    let mut app = App::new(tick);
     app.tick();
     let mut next = Instant::now() + tick;
     let mut dirty = true;
@@ -128,6 +128,7 @@ fn event_loop(terminal: &mut DefaultTerminal, tick: Duration) -> io::Result<()> 
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') => {
                         app.tick();
+                        next = Instant::now() + tick;
                         dirty = true;
                     }
                     _ => {}
