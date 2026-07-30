@@ -3,11 +3,6 @@ name: release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Tag to build
-        required: true
 
 permissions:
   contents: write
@@ -17,8 +12,20 @@ permissions:
 jobs:
   build:
     runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Test
+        run: cargo test --locked
 
       - name: Build
         run: cargo build --release --locked

@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Binary size guard
+        run: |
+          set -eu
+          cargo build --release --locked
+          size=$(stat -c %s target/release/citop)
+          echo "citop: ${size} bytes"
+          test "$size" -le 655360

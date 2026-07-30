@@ -262,6 +262,39 @@ It never reads `~/actions-runner/.credentials`, `.credentials_rsaparams` or
 `.runner`. From the runner directory it reads the file *names* in `_diag` and
 the process list in the service cgroup, nothing else.
 
+## Runner setup
+
+The self-hosted runner needs its Rust toolchain isolated from the host's, because
+`Swatinem/rust-cache` restores `$CARGO_HOME/bin` and will otherwise overwrite the
+host `rustup` with a copy that does not contain it, leaving every shim dangling.
+
+`scripts/setup-runner.sh` is idempotent and does the whole thing:
+
+```bash
+sh scripts/setup-runner.sh
+```
+
+| What it sets | Value |
+|---|---|
+| `~/actions-runner/.env` | `CARGO_HOME=$HOME/ci-toolchain/cargo`, `RUSTUP_HOME=$HOME/ci-toolchain/rustup` |
+| `~/actions-runner/.path` | prepends `$HOME/ci-toolchain/cargo/bin` |
+| host toolchain | installs `rustup` with `stable` plus clippy and rustfmt, only if absent |
+| runner service | restarts it, only when `.env` or `.path` changed |
+
+Jobs then resolve `cargo` from the CI toolchain, and nothing a workflow does can
+reach `~/.cargo`. Override the locations with `RUNNER_ROOT`, `CI_ROOT` and
+`RUNNER_SERVICE`.
+
+Workflows in this repo pair `dtolnay/rust-toolchain` with
+`Swatinem/rust-cache` set to `cache-bin: false`, so citop's own jobs cannot do
+to another runner what this setup defends against.
+
+Confirm the host survived a job that used the cache:
+
+```bash
+test -x ~/.cargo/bin/rustup && echo "host toolchain INTACT" || echo "host toolchain CLOBBERED"
+```
+
 ## Test
 
 ```bash
