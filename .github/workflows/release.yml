@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Stage artifact
+        id: stage
+        run: |
+          set -eu
+          target=$(rustc -vV | awk '/^host:/{print $2}')
+          name="citop-${target}"
+          mkdir -p dist
+          cp target/release/citop "dist/${name}"
+          cd dist
+          sha256sum "${name}" > "${name}.sha256"
+          sha256sum "${name}" >> SHA256SUMS
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the binary runs
+        run: ./dist/${{ steps.stage.outputs.name }} --help
+
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/${{ steps.stage.outputs.name }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ steps.stage.outputs.name }}
+            dist/${{ steps.stage.outputs.name }}.sha256
+            dist/SHA256SUMS

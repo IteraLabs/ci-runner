@@ -4,8 +4,8 @@ Terminal UI and other Tools for self-hosted CI jobs running on small devices.
 
 ## citop
 
-Single-binary terminal dashboard for a self-hosted GitHub Actions runner.
-Reads `/proc` and `/sys` directly. One row per logical core.
+Single-binary terminal dashboard for a self-hosted GitHub Actions runner. Reads
+`/proc` and `/sys` directly. No network access, no child processes, no writes.
 
 ```
    citop  circadian-runner
@@ -36,14 +36,15 @@ Reads `/proc` and `/sys` directly. One row per logical core.
 └──────────────────────────────────────────────────────────────────────────────┘
   q quit   r refresh
 ```
+
 Fits 80x24, where the header collapses to one line. The full header and the key
 hints appear at 26 rows and up. Per-core rows collapse to one aggregate row when
 there are more cores than the terminal has room for.
 
-### Measured on the Pi, not estimated
+## Benchmark
 
 Raspberry Pi 4 Model B, Ubuntu 24.04 aarch64, 1 Hz refresh, 60 s idle average,
-both at 80x26.
+both tools at 80x26, measured back to back on an otherwise idle machine.
 
 | | citop | htop |
 |---|---|---|
@@ -51,24 +52,89 @@ both at 80x26.
 | Resident memory | 2.4 MB | 3.9 MB |
 | Stripped binary | 595 KB | 399 KB |
 | Threads | 1 | 2 |
+| Syscalls per second | 31 | not measured |
 
-`opt-level = "z"` beat `"s"` on this target by 64 KiB, measured on device: 529,168
-bytes versus 594,704 for the same source. The release profile pairs it with fat
-LTO, one codegen unit, `panic = "abort"` and symbol stripping.
-
-### Install
+Reproduce the CPU figure:
 
 ```bash
-cargo install ci-runner
+P=$(pgrep -x citop); read _ _ _ _ _ _ _ _ _ _ _ _ _ U1 S1 _ < /proc/$P/stat; sleep 60; read _ _ _ _ _ _ _ _ _ _ _ _ _ U2 S2 _ < /proc/$P/stat; echo "scale=3; 100*(($U2-$U1)+($S2-$S1))/100/60" | bc
 ```
 
-Build from source on the target device:
+`opt-level = "z"` beat `"s"` on this target by 64 KiB, measured on device:
+529,168 bytes versus 594,704 for the same source. The release profile pairs it
+with fat LTO, one codegen unit, `panic = "abort"` and symbol stripping.
+
+## Metrics
+
+| Metric | Source | What it tells you |
+|---|---|---|
+| name | `uname(2)` nodename | Which runner you are looking at, when several are open side by side |
+| os | `/etc/os-release`, `uname(2)` | Distro, kernel and architecture a job will build against |
+| model | `/proc/device-tree/model` | Board revision, which sets the thermal and I/O ceiling |
+| cpu | `sysconf`, cpufreq limits | Core count and clock range, the ceiling for job parallelism |
+| clock | `cpufreq/policy0/scaling_cur_freq` | Current clock. Stuck at minimum under load means thermal or power limiting |
+| load | `/proc/loadavg` | Run queue depth. Above the core count, jobs are queueing for CPU |
+| psi | `/proc/pressure/{cpu,memory,io}` | Percent of time tasks stalled on each resource. Separates busy from starved better than load |
+| runner | `Runner.Listener` in the service cgroup | Whether the runner is connected and able to accept work at all |
+| jobs | `Runner.Worker` count in the service cgroup | How many jobs are executing right now |
+| uptime | `/proc/uptime` | Host uptime, to compare against runner uptime when diagnosing restarts |
+| last job | newest `Worker_*.log` name in `_diag` | When work last arrived. A stale value means jobs are not routed here |
+| res | service cgroup `memory.current`, `memory.peak`, `pids.current` | What the runner and its job consume, separate from the rest of the box |
+| cpu_N | `/proc/stat` `cpuN` deltas | Per-core utilisation. One core pinned while others idle means a serial build step |
+| cpu-temp | `/sys/class/thermal/thermal_zone0/temp` | SoC temperature across the 30-85 C range |
+| fan | `hwmon` `gpio_fan/pwm1` | Whether active cooling is engaged |
+| fan-speed | `hwmon` `gpio_fan/fan1_input` | Fan RPM, or N/A where there is no tachometer |
+| throttle | `soc:firmware/get_throttled` | Undervoltage, frequency capping, thermal throttling and soft temperature limit, current and since boot. A marginal power supply degrades builds with no other symptom |
+| ram | `/proc/meminfo`, `MemTotal - MemAvailable` | Headroom before the OOM killer starts ending jobs |
+| swap | `/proc/meminfo` | Swap in use. A sustained value on an SD card destroys build times |
+| disk | `statvfs("/")` | Free space. A full disk fails checkout and artifact upload |
+| disk-io | `/proc/diskstats` sectors and `io_ticks` | Throughput and device utilisation. Near 100 % means storage is the bottleneck |
+| eth0, wlan0 | `/proc/net/dev` deltas | Throughput per interface, plus cumulative errors and drops. Rising drops explain flaky checkouts |
+
+Interfaces come from `/sys/class/net`. Loopback, bridge, docker and veth are
+excluded. Wireless is identified by `wireless` or `phy80211`.
+
+Each metric is sampled at the rate it changes: disk I/O and per-core CPU every
+tick, pressure and cgroup usage every second tick, throttle flags every fifth,
+`statvfs` every tenth. Every sampled file is opened once at startup and re-read
+with `pread` at offset 0.
+
+## Install
+
+### From a release
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/IteraLabs/ci-runner/main/install.sh | sh
+```
+
+Downloads the binary for your architecture, verifies its SHA-256 against the
+published checksum, and installs to `~/.local/bin/citop`. Override with
+`CITOP_PREFIX`, `CITOP_TAG` or `CITOP_REPO`.
+
+The same by hand:
+
+```bash
+curl -fsSLO https://github.com/IteraLabs/ci-runner/releases/latest/download/citop-aarch64-unknown-linux-gnu
+curl -fsSLO https://github.com/IteraLabs/ci-runner/releases/latest/download/citop-aarch64-unknown-linux-gnu.sha256
+sha256sum -c citop-aarch64-unknown-linux-gnu.sha256
+```
+
+### From source
+
+```bash
+cargo install --git https://github.com/IteraLabs/ci-runner
+```
+
+### Clone and run
+
+```bash
+git clone https://github.com/IteraLabs/ci-runner
+cd ci-runner
 cargo build --release
+./target/release/citop
 ```
 
-### Run
+## Run
 
 Local:
 
@@ -94,50 +160,109 @@ Variable refresh, in milliseconds, minimum 100, default 1000:
 citop 2000
 ```
 
-Keys: `q` or `Esc` quit, `r` refresh now.
+Keys: `q` or `Esc` quit, `r` refresh now. An interactive terminal is required on
+both stdin and stdout; it exits with status 2 otherwise.
 
-### Display
+## Verifying what it does
 
-| Field | Source |
-|---|---|
-| Name | `uname(2)` nodename |
-| Operating system | `/etc/os-release`, `uname(2)` |
-| Hardware model | `/proc/device-tree/model` |
-| Capacity | `sysconf(_SC_NPROCESSORS_ONLN)`, cpufreq limits |
-| Clock | `cpufreq/policy0/scaling_cur_freq` |
-| Load | `/proc/loadavg` |
-| psi | `/proc/pressure/{cpu,memory,io}` `some avg10` |
-| Runner state | `Runner.Listener` in the service cgroup |
-| Jobs | `Runner.Worker` count in the service cgroup |
-| Last job | newest `Worker_*.log` name in `_diag` |
-| res | service cgroup `memory.current`, `memory.peak`, `pids.current` |
-| Uptime | `/proc/uptime` |
-| Per-core CPU | `/proc/stat` `cpuN` deltas |
-| cpu-temp | `/sys/class/thermal/thermal_zone0/temp` |
-| fan | `hwmon` `gpio_fan/pwm1`, falling back to the fan cooling device |
-| fan-speed | `hwmon` `gpio_fan/fan1_input`, N/A without a tachometer |
-| throttle | `soc:firmware/get_throttled` bitmask, current and since boot |
-| RAM, swap | `/proc/meminfo`, `MemTotal - MemAvailable` |
-| Disk | `statvfs("/")` |
-| disk-io | `/proc/diskstats` sector deltas and `io_ticks` for utilisation |
-| Ethernet, wireless | `/proc/net/dev` deltas, rx+tx errors and drops |
+The claims below are properties you can check yourself, not assurances.
 
-Interfaces come from `/sys/class/net`. Loopback, bridge, docker and veth are
-excluded. Wireless is identified by `wireless` or `phy80211`.
+### 1. Confirm it makes no network calls and writes nothing
 
-### Cost
+```bash
+strace -f -o /tmp/citop.trace citop
+```
 
-Every sampled file is opened once and re-read with `pread` at offset 0. All
-eight sources added for pressure, throttling, disk I/O and cgroup accounting
-cost 81 us per cycle measured together on the target, against a 1000 ms tick.
-Metrics that change slowly are sampled less often: pressure and cgroup usage
-every second tick, throttle flags every fifth, `statvfs` every tenth. Network
-errors and drops are free, coming from columns of a line already parsed.
+Quit with `q`, then:
 
-Rendering dominates the cost, not sampling. Growing from one meter block to
-four moved the process from 0.64 % to 0.83 % of one core.
+```bash
+grep -cE '\b(socket|connect|bind|sendto|sendmsg|recvfrom)\(' /tmp/citop.trace
+grep -cE '\b(execve|fork|clone|clone3)\(' /tmp/citop.trace
+grep 'openat(' /tmp/citop.trace | grep -vc O_RDONLY
+grep -oE 'write\([0-9]+' /tmp/citop.trace | sort -u
+```
 
-### Test
+Expected: `0` network syscalls, `1` process spawn (the `execve` of citop
+itself), `0` opens without `O_RDONLY`, and writes only to file descriptor 1.
+
+Every path it opens appears in the Metrics table, plus `/dev/tty` for terminal
+size and the C library. List them from your own trace:
+
+```bash
+grep -oE 'openat\(AT_FDCWD, "[^"]+"' /tmp/citop.trace | cut -d'"' -f2 | sort -u
+```
+
+### 2. Confirm the syscall rate
+
+```bash
+sudo timeout 10 strace -c -p "$(pgrep -x citop)"
+```
+
+Expected on an idle host: about 310 syscalls over 10 seconds, dominated by
+`pread64`. A busy loop would show orders of magnitude more.
+
+### 3. Check the dependency tree for advisories
+
+```bash
+cargo install cargo-audit && cargo audit
+```
+
+Or query the same database without installing anything:
+
+```bash
+python3 - <<'EOF'
+import json, re, urllib.request
+pairs = re.findall(r'name = "([^"]+)"\nversion = "([^"]+)"', open('Cargo.lock').read())
+q = {"queries": [{"package": {"name": n, "ecosystem": "crates.io"}, "version": v} for n, v in pairs]}
+r = urllib.request.Request("https://api.osv.dev/v1/querybatch", data=json.dumps(q).encode(),
+                           headers={"Content-Type": "application/json"})
+res = json.load(urllib.request.urlopen(r))
+print(sum(len(x.get("vulns", [])) for x in res["results"]), "advisories")
+EOF
+```
+
+The dependency set is `ratatui` with default features off, and `libc`. The build
+graph contains no HTTP client, no TLS stack, no serialisation framework and no
+async runtime.
+
+### 4. Verify a downloaded binary
+
+```bash
+sha256sum -c citop-aarch64-unknown-linux-gnu.sha256
+```
+
+Releases are built by `.github/workflows/release.yml` and carry a signed SLSA
+provenance attestation naming the commit and workflow that produced them:
+
+```bash
+gh attestation verify citop-aarch64-unknown-linux-gnu --repo IteraLabs/ci-runner
+```
+
+### 5. Reproduce the binary yourself
+
+The highest-trust path is to not use a published binary at all:
+
+```bash
+git clone https://github.com/IteraLabs/ci-runner
+cd ci-runner && cargo build --release --locked
+sha256sum target/release/citop
+```
+
+`--locked` builds against the committed `Cargo.lock`, so the dependency versions
+are the ones audited above.
+
+### What it needs, and what it does not
+
+It runs as an unprivileged user and needs no root, no capabilities, no group
+membership and no setuid bit. The one path it cannot read as a normal user,
+`cpufreq/policy0/cpuinfo_cur_freq`, is deliberately avoided in favour of its
+world-readable sibling `scaling_cur_freq`.
+
+It never reads `~/actions-runner/.credentials`, `.credentials_rsaparams` or
+`.runner`. From the runner directory it reads the file *names* in `_diag` and
+the process list in the service cgroup, nothing else.
+
+## Test
 
 ```bash
 cargo test
@@ -145,6 +270,6 @@ cargo test
 
 Parsers take byte slices and run against fixtures, so the suite passes off-target.
 
-### License
+## License
 
 Apache-2.0

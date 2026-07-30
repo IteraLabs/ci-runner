@@ -73,6 +73,10 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Duration, ArgError>
     Ok(Duration::from_millis(ms))
 }
 
+fn is_interactive() -> bool {
+    unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }
+}
+
 fn main() -> ExitCode {
     let tick = match parse_args(std::env::args().skip(1)) {
         Ok(t) => t,
@@ -86,6 +90,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if !is_interactive() {
+        eprintln!("citop: stdin and stdout must be a terminal");
+        return ExitCode::from(2);
+    }
     install_handlers();
     match ratatui::run(|terminal| event_loop(terminal, tick)) {
         Ok(()) => ExitCode::SUCCESS,
