@@ -1,33 +1,36 @@
 use crate::probe::{Probe, parse_i64, read_trimmed};
 
-pub fn fan_path() -> Option<String> {
+pub fn fan_paths() -> (Option<String>, Option<String>) {
     if let Ok(dir) = std::fs::read_dir("/sys/class/hwmon") {
         for e in dir.flatten() {
             let p = e.path();
             let is_fan = std::fs::read(p.join("name"))
                 .map(|n| n.starts_with(b"gpio_fan") || n.starts_with(b"pwm_fan"))
                 .unwrap_or(false);
-            if is_fan {
-                let pwm = p.join("pwm1");
-                if pwm.exists() {
-                    return Some(pwm.to_string_lossy().into_owned());
-                }
+            if is_fan && p.join("pwm1").exists() {
+                let rpm = p.join("fan1_input");
+                return (
+                    Some(p.join("pwm1").to_string_lossy().into_owned()),
+                    rpm.exists().then(|| rpm.to_string_lossy().into_owned()),
+                );
             }
         }
     }
     for i in 0..8 {
         let base = format!("/sys/class/thermal/cooling_device{i}");
         if read_trimmed(&format!("{base}/type")).is_some_and(|t| t.contains("fan")) {
-            return Some(format!("{base}/cur_state"));
+            return (Some(format!("{base}/cur_state")), None);
         }
     }
-    None
+    (None, None)
 }
 
 pub struct Fan {
-    probe: Probe,
+    state: Probe,
+    tach: Option<Probe>,
     present: bool,
     pub on: Option<bool>,
+    pub rpm: Option<u64>,
 }
 
 impl Default for Fan {
@@ -38,11 +41,13 @@ impl Default for Fan {
 
 impl Fan {
     pub fn new() -> Self {
-        let path = fan_path();
+        let (state, tach) = fan_paths();
         Self {
-            probe: Probe::open(path.as_deref().unwrap_or("/nonexistent"), 32),
-            present: path.is_some(),
+            state: Probe::open(state.as_deref().unwrap_or("/nonexistent"), 32),
+            tach: tach.map(|p| Probe::open(p, 32)),
+            present: state.is_some(),
             on: None,
+            rpm: None,
         }
     }
 
@@ -50,16 +55,28 @@ impl Fan {
         if !self.present {
             return;
         }
-        if self.probe.refresh() {
-            self.on = parse_i64(self.probe.data()).map(|v| v > 0);
+        if self.state.refresh() {
+            self.on = parse_i64(self.state.data()).map(|v| v > 0);
+        }
+        if let Some(t) = self.tach.as_mut()
+            && t.refresh()
+        {
+            self.rpm = parse_i64(t.data()).filter(|v| *v >= 0).map(|v| v as u64);
         }
     }
 
     pub fn label(&self) -> &'static str {
         match self.on {
-            Some(true) => "fan ON",
-            Some(false) => "fan OFF",
-            None => "fan --",
+            Some(true) => "ON",
+            Some(false) => "OFF",
+            None => "N/A",
+        }
+    }
+
+    pub fn rpm_label(&self) -> String {
+        match self.rpm {
+            Some(r) => format!("{r} RPM"),
+            None => "N/A".into(),
         }
     }
 }
@@ -170,11 +187,38 @@ mod tests {
     fn fan_label_reflects_state() {
         let mut f = Fan::new();
         f.on = Some(true);
-        assert_eq!(f.label(), "fan ON");
+        assert_eq!(f.label(), "ON");
         f.on = Some(false);
-        assert_eq!(f.label(), "fan OFF");
+        assert_eq!(f.label(), "OFF");
         f.on = None;
-        assert_eq!(f.label(), "fan --");
+        assert_eq!(f.label(), "N/A");
+    }
+
+    #[test]
+    fn rpm_label_falls_back_to_not_available() {
+        let mut f = Fan::new();
+        f.rpm = None;
+        assert_eq!(f.rpm_label(), "N/A");
+        f.rpm = Some(2400);
+        assert_eq!(f.rpm_label(), "2400 RPM");
+    }
+
+    #[test]
+    fn a_stopped_fan_reports_zero_rpm_rather_than_hiding_it() {
+        let mut f = Fan::new();
+        f.rpm = Some(0);
+        assert_eq!(f.rpm_label(), "0 RPM");
+    }
+
+    #[test]
+    fn rpm_is_unavailable_only_when_there_is_no_tachometer() {
+        let mut f = Fan::new();
+        f.tick();
+        if f.tach.is_some() {
+            assert!(f.rpm.is_some(), "tach node present but no reading");
+        } else {
+            assert_eq!(f.rpm_label(), "N/A");
+        }
     }
 
     #[test]
@@ -184,7 +228,7 @@ mod tests {
         if f.present {
             assert!(f.on.is_some(), "fan path found but no readable state");
         } else {
-            assert_eq!(f.label(), "fan --");
+            assert_eq!(f.label(), "N/A");
         }
     }
 

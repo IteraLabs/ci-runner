@@ -7,8 +7,8 @@ use ratatui::widgets::{Block, Padding, Paragraph};
 use crate::app::App;
 use crate::fmt;
 
-const LABEL: usize = 7;
-const KEYW: usize = 9;
+const LABEL: usize = 10;
+const KEYW: usize = 10;
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const KEY: Style = Style::new().fg(Color::Gray);
 
@@ -27,12 +27,14 @@ pub fn inner_width(total: u16) -> u16 {
     total.saturating_sub(4)
 }
 
-pub fn bar_width(inner: u16) -> usize {
-    inner.saturating_sub(52).clamp(8, 32) as usize
+pub const OVERHEAD: u16 = LABEL as u16 + 9;
+
+pub fn bar_width(inner: u16, reserved: u16) -> usize {
+    inner.saturating_sub(OVERHEAD + reserved).clamp(8, 32) as usize
 }
 
 pub fn full_bar_width(inner: u16) -> usize {
-    inner.saturating_sub(16).max(8) as usize
+    inner.saturating_sub(OVERHEAD).max(8) as usize
 }
 
 fn pad_block(title: &str) -> Block<'_> {
@@ -153,11 +155,9 @@ fn runner(app: &App) -> Paragraph<'_> {
     ])
 }
 
-fn meters(app: &App, inner: u16, cpu_rows: usize) -> Paragraph<'_> {
-    let w = bar_width(inner);
+fn cpu_section(app: &App, inner: u16, cpu_rows: usize) -> Paragraph<'_> {
     let full = full_bar_width(inner);
-    let mut out = Vec::with_capacity(cpu_rows + 4);
-
+    let mut out = Vec::with_capacity(cpu_rows);
     if cpu_rows > 1 {
         for i in 0..cpu_rows {
             let p = app.cpu.per_core.get(i).copied().flatten();
@@ -166,14 +166,34 @@ fn meters(app: &App, inner: u16, cpu_rows: usize) -> Paragraph<'_> {
     } else {
         out.push(meter("cpu", app.cpu.percent, String::new(), full));
     }
+    Paragraph::new(out)
+}
 
-    let tright = match app.therm.milli_c {
-        Some(t) => format!("{} C  {}", fmt::milli(t), app.fan.label()),
-        None => "sensor unavailable".into(),
+fn temp_section(app: &App, inner: u16) -> Paragraph<'_> {
+    let w = bar_width(inner, 8);
+    let right = match app.therm.milli_c {
+        Some(t) => format!("{} C", fmt::milli(t)),
+        None => "N/A".into(),
     };
-    let tpct = app.therm.milli_c.map(|_| app.therm.percent_of_range());
-    out.push(meter("temp", tpct, tright, w));
+    let pct = app.therm.milli_c.map(|_| app.therm.percent_of_range());
+    let fan_style = match app.fan.on {
+        Some(true) => Style::new().fg(Color::Green),
+        Some(false) => DIM,
+        None => DIM,
+    };
+    Paragraph::new(vec![
+        meter("cpu-temp", pct, right, w),
+        Line::from(vec![
+            Span::styled(format!("{:<KEYW$}", "fan"), KEY),
+            Span::styled(app.fan.label(), fan_style),
+        ]),
+        kv("fan-speed", app.fan.rpm_label()),
+    ])
+}
 
+fn memory_section(app: &App, inner: u16) -> Paragraph<'_> {
+    let w = bar_width(inner, 34);
+    let mut out = Vec::with_capacity(3);
     match app.mem.info {
         Some(m) => {
             out.push(meter(
@@ -208,7 +228,6 @@ fn meters(app: &App, inner: u16, cpu_rows: usize) -> Paragraph<'_> {
             out.push(meter("swap", None, "unavailable".into(), w));
         }
     }
-
     match app.mem.disk {
         Some(d) => out.push(meter(
             "disk",
@@ -223,7 +242,6 @@ fn meters(app: &App, inner: u16, cpu_rows: usize) -> Paragraph<'_> {
         )),
         None => out.push(meter("disk", None, "unavailable".into(), w)),
     }
-
     Paragraph::new(out)
 }
 
@@ -278,11 +296,15 @@ pub fn cpu_rows_for(height: u16, cores: usize) -> usize {
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let cpu_rows = cpu_rows_for(area.height, app.cpu.per_core.len().max(app.host.cores));
-    let [top, cap, met, net, foot] = Layout::vertical([
+    let cores = app.cpu.per_core.len().max(app.host.cores);
+    let cpu_rows = cpu_rows_for(area.height, cores);
+    let mid = cpu_rows.max(3) as u16 + 2;
+
+    let [top, row1, row2, row3, row4, foot] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(6),
-        Constraint::Length(cpu_rows as u16 + 6),
+        Constraint::Length(mid),
+        Constraint::Length(5),
         Constraint::Length(4),
         Constraint::Min(0),
     ])
@@ -293,16 +315,26 @@ pub fn render(frame: &mut Frame, app: &App) {
         top,
     );
 
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(cap);
-    frame.render_widget(capacity(app).block(pad_block(" capacity ")), left);
-    frame.render_widget(runner(app).block(pad_block(" runner ")), right);
+    let halves = [Constraint::Percentage(50), Constraint::Percentage(50)];
+    let [cap_a, run_a] = Layout::horizontal(halves).areas(row1);
+    frame.render_widget(capacity(app).block(pad_block(" capacity ")), cap_a);
+    frame.render_widget(runner(app).block(pad_block(" runner ")), run_a);
+
+    let [cpu_a, temp_a] = Layout::horizontal(halves).areas(row2);
+    frame.render_widget(
+        cpu_section(app, inner_width(cpu_a.width), cpu_rows).block(pad_block(" cpu ")),
+        cpu_a,
+    );
+    frame.render_widget(
+        temp_section(app, inner_width(temp_a.width)).block(pad_block(" temp ")),
+        temp_a,
+    );
 
     frame.render_widget(
-        meters(app, inner_width(met.width), cpu_rows).block(pad_block(" cpu ")),
-        met,
+        memory_section(app, inner_width(row3.width)).block(pad_block(" memory ")),
+        row3,
     );
-    frame.render_widget(network(app).block(pad_block(" network ")), net);
+    frame.render_widget(network(app).block(pad_block(" networking ")), row4);
     footer(frame, foot);
 }
 
@@ -326,12 +358,27 @@ fn footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
 
+    const ALL_KEYS: [&str; 12] = [
+        "cpu",
+        "clock",
+        "load",
+        "tasks",
+        "runner",
+        "jobs",
+        "uptime",
+        "last job",
+        "cpu-temp",
+        "fan",
+        "fan-speed",
+        "wlan0",
+    ];
+
     #[test]
     fn bar_width_stays_within_bounds_at_any_terminal_size() {
-        assert_eq!(bar_width(0), 8);
-        assert_eq!(bar_width(52), 8);
-        assert_eq!(bar_width(76), 24);
-        assert_eq!(bar_width(300), 32);
+        assert_eq!(bar_width(0, 34), 8);
+        assert_eq!(bar_width(52, 34), 8);
+        assert_eq!(bar_width(76, 34), 23);
+        assert_eq!(bar_width(300, 34), 32);
     }
 
     #[test]
@@ -366,7 +413,7 @@ mod tests {
             "ram",
             Some(42),
             "524.1 MiB / 3.6 GiB  cache 3.0 GiB".into(),
-            bar_width(inner),
+            bar_width(inner, 34),
         );
         assert!(
             line.width() <= inner as usize,
@@ -419,9 +466,7 @@ mod tests {
 
     #[test]
     fn kv_keeps_a_separator_after_the_longest_key() {
-        for key in [
-            "cpu", "ram", "disk", "tasks", "runner", "uptime", "last job",
-        ] {
+        for key in ALL_KEYS {
             let s = kv(key, "VALUE".into()).to_string();
             assert!(
                 s.contains(&format!("{key} ")),
@@ -436,6 +481,17 @@ mod tests {
         let a = kv("cpu", "X".into()).to_string();
         let b = kv("last job", "X".into()).to_string();
         assert_eq!(a.find('X'), b.find('X'));
+    }
+
+    #[test]
+    fn every_meter_label_keeps_a_separator_before_its_bar() {
+        for key in ALL_KEYS {
+            let s = meter_owned(key.to_string(), Some(1), String::new(), 8).to_string();
+            assert!(
+                s.starts_with(&format!("{key} ")),
+                "meter label {key} touches its bar: {s:?}"
+            );
+        }
     }
 
     #[test]
