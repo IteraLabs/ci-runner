@@ -350,10 +350,22 @@ SwapFree:        8388604 kB\n";
     }
 
     #[test]
-    fn root_disk_resolves_on_a_live_system() {
+    #[cfg_attr(not(target_os = "linux"), ignore = "requires a live Linux host")]
+    fn root_disk_resolves_to_a_device_present_in_diskstats() {
         let n = root_disk_name().expect("root device must resolve");
         assert!(!n.is_empty());
-        assert!(!n.ends_with(|c: char| c.is_ascii_digit() && n.len() > 3 && n.contains('p')));
+        let raw = std::fs::read("/proc/diskstats").expect("diskstats readable");
+        assert!(
+            parse_diskstats(&raw, &n).is_some(),
+            "resolved root disk {n} is absent from /proc/diskstats"
+        );
+    }
+
+    #[test]
+    fn strip_partition_takes_partition_names_not_disk_names() {
+        assert_eq!(strip_partition("mmcblk0p2"), "mmcblk0");
+        assert_eq!(strip_partition("mmcblk0"), "mmcblk");
+        assert_eq!(strip_partition("sda"), "sda");
     }
 
     #[test]

@@ -60,41 +60,6 @@ P=$(pgrep -x citop); read _ _ _ _ _ _ _ _ _ _ _ _ _ U1 S1 _ < /proc/$P/stat; sle
 529,168 bytes versus 594,704 for the same source. The release profile pairs it
 with fat LTO, one codegen unit, `panic = "abort"` and symbol stripping.
 
-## Metrics
-
-| Metric | Source | What it tells you |
-|---|---|---|
-| name | `uname(2)` nodename | Which runner you are looking at, when several are open side by side |
-| os | `/etc/os-release`, `uname(2)` | Distro, kernel and architecture a job will build against |
-| model | `/proc/device-tree/model` | Board revision, which sets the thermal and I/O ceiling |
-| cpu | `sysconf`, cpufreq limits | Core count and clock range, the ceiling for job parallelism |
-| clock | `cpufreq/policy0/scaling_cur_freq` | Current clock. Stuck at minimum under load means thermal or power limiting |
-| load | `/proc/loadavg` | Run queue depth. Above the core count, jobs are queueing for CPU |
-| psi | `/proc/pressure/{cpu,memory,io}` | Percent of time tasks stalled on each resource. Separates busy from starved better than load |
-| runner | `Runner.Listener` in the service cgroup | Whether the runner is connected and able to accept work at all |
-| jobs | `Runner.Worker` count in the service cgroup | How many jobs are executing right now |
-| uptime | `/proc/uptime` | Host uptime, to compare against runner uptime when diagnosing restarts |
-| last job | newest `Worker_*.log` name in `_diag` | When work last arrived. A stale value means jobs are not routed here |
-| res | service cgroup `memory.current`, `memory.peak`, `pids.current` | What the runner and its job consume, separate from the rest of the box |
-| cpu_N | `/proc/stat` `cpuN` deltas | Per-core utilisation. One core pinned while others idle means a serial build step |
-| cpu-temp | `/sys/class/thermal/thermal_zone0/temp` | SoC temperature across the 30-85 C range |
-| fan | `hwmon` `gpio_fan/pwm1` | Whether active cooling is engaged |
-| fan-speed | `hwmon` `gpio_fan/fan1_input` | Fan RPM, or N/A where there is no tachometer |
-| throttle | `soc:firmware/get_throttled` | Undervoltage, frequency capping, thermal throttling and soft temperature limit, current and since boot. A marginal power supply degrades builds with no other symptom |
-| ram | `/proc/meminfo`, `MemTotal - MemAvailable` | Headroom before the OOM killer starts ending jobs |
-| swap | `/proc/meminfo` | Swap in use. A sustained value on an SD card destroys build times |
-| disk | `statvfs("/")` | Free space. A full disk fails checkout and artifact upload |
-| disk-io | `/proc/diskstats` sectors and `io_ticks` | Throughput and device utilisation. Near 100 % means storage is the bottleneck |
-| eth0, wlan0 | `/proc/net/dev` deltas | Throughput per interface, plus cumulative errors and drops. Rising drops explain flaky checkouts |
-
-Interfaces come from `/sys/class/net`. Loopback, bridge, docker and veth are
-excluded. Wireless is identified by `wireless` or `phy80211`.
-
-Each metric is sampled at the rate it changes: disk I/O and per-core CPU every
-tick, pressure and cgroup usage every second tick, throttle flags every fifth,
-`statvfs` every tenth. Every sampled file is opened once at startup and re-read
-with `pread` at offset 0.
-
 ## Install
 
 ### From a release
@@ -118,7 +83,7 @@ sha256sum -c citop-aarch64-unknown-linux-gnu.sha256
 ### From source
 
 ```bash
-cargo install --git https://github.com/IteraLabs/citop
+cargo install --git https://github.com/IteraLabs/citop --locked
 ```
 
 ### Clone and run
@@ -158,6 +123,41 @@ citop 2000
 
 Keys: `q` or `Esc` quit, `r` refresh now. An interactive terminal is required on
 both stdin and stdout; it exits with status 2 otherwise.
+
+## Metrics
+
+| Metric | Source | What it tells you |
+|---|---|---|
+| name | `uname(2)` nodename | Which runner you are looking at, when several are open side by side |
+| os | `/etc/os-release`, `uname(2)` | Distro, kernel and architecture a job will build against |
+| model | `/proc/device-tree/model` | Board revision, which sets the thermal and I/O ceiling |
+| cpu | `sysconf`, cpufreq limits | Core count and clock range, the ceiling for job parallelism |
+| clock | `cpufreq/policy0/scaling_cur_freq` | Current clock. Stuck at minimum under load means thermal or power limiting |
+| load | `/proc/loadavg` | Run queue depth. Above the core count, jobs are queueing for CPU |
+| psi | `/proc/pressure/{cpu,memory,io}` | Percent of time tasks stalled on each resource. Separates busy from starved better than load |
+| runner | `Runner.Listener` in the service cgroup | Whether the runner is connected and able to accept work at all |
+| jobs | `Runner.Worker` count in the service cgroup | How many jobs are executing right now |
+| uptime | `/proc/uptime` | Host uptime, to compare against runner uptime when diagnosing restarts |
+| last job | newest `Worker_*.log` name in `_diag` | When work last arrived. A stale value means jobs are not routed here |
+| res | service cgroup `memory.current`, `memory.peak`, `pids.current` | What the runner and its job consume, separate from the rest of the box |
+| cpu_N | `/proc/stat` `cpuN` deltas | Per-core utilisation. One core pinned while others idle means a serial build step |
+| cpu-temp | `/sys/class/thermal/thermal_zone0/temp` | SoC temperature across the 30-85 C range |
+| fan | `hwmon` `gpio_fan/pwm1` | Whether active cooling is engaged |
+| fan-speed | `hwmon` `gpio_fan/fan1_input` | Fan RPM, or N/A where there is no tachometer |
+| throttle | `soc:firmware/get_throttled` | Undervoltage, frequency capping, thermal throttling and soft temperature limit, current and since boot. A marginal power supply degrades builds with no other symptom |
+| ram | `/proc/meminfo`, `MemTotal - MemAvailable` | Headroom before the OOM killer starts ending jobs |
+| swap | `/proc/meminfo` | Swap in use. A sustained value on an SD card destroys build times |
+| disk | `statvfs("/")` | Free space. A full disk fails checkout and artifact upload |
+| disk-io | `/proc/diskstats` sectors and `io_ticks` | Throughput and device utilisation. Near 100 % means storage is the bottleneck |
+| eth0, wlan0 | `/proc/net/dev` deltas | Throughput per interface, plus cumulative errors and drops. Rising drops explain flaky checkouts |
+
+Interfaces come from `/sys/class/net`. Loopback, bridge, docker and veth are
+excluded. Wireless is identified by `wireless` or `phy80211`.
+
+Each metric is sampled at the rate it changes: disk I/O and per-core CPU every
+tick, pressure and cgroup usage every second tick, throttle flags every fifth,
+`statvfs` every tenth. Every sampled file is opened once at startup and re-read
+with `pread` at offset 0.
 
 ## Verifying what it does
 
@@ -206,17 +206,12 @@ cargo install cargo-audit && cargo audit
 Or query the same database without installing anything:
 
 ```bash
-python3 - <<'EOF'
-import json, re, urllib.request
-pairs = re.findall(r'name = "([^"]+)"\nversion = "([^"]+)"', open('Cargo.lock').read())
-q = {"queries": [{"package": {"name": n, "ecosystem": "crates.io"}, "version": v} for n, v in pairs]}
-r = urllib.request.Request("https://api.osv.dev/v1/querybatch", data=json.dumps(q).encode(),
-                           headers={"Content-Type": "application/json"})
-res = json.load(urllib.request.urlopen(r))
-print(sum(len(x.get("vulns", [])) for x in res["results"]), "advisories")
-EOF
+awk '/^name = /{n=$3} /^version = /{if(n!=""){print n" "$3; n=""}}' Cargo.lock \
+  | tr -d '"' \
+  | jq -Rn '{queries:[inputs|split(" ")|{package:{name:.[0],ecosystem:"crates.io"},version:.[1]}]}' \
+  | curl -s -d @- https://api.osv.dev/v1/querybatch \
+  | jq '[.results[].vulns // []] | flatten | length'
 ```
-
 The dependency set is `ratatui` with default features off, and `libc`. The build
 graph contains no HTTP client, no TLS stack, no serialisation framework and no
 async runtime.
@@ -297,7 +292,9 @@ test -x ~/.cargo/bin/rustup && echo "host toolchain INTACT" || echo "host toolch
 cargo test
 ```
 
-Parsers take byte slices and run against fixtures, so the suite passes off-target.
+Parsers take byte slices and run against fixtures, so they pass on any host. The
+handful of checks that read a live `/proc` are marked `ignore` off Linux; on
+macOS they are skipped, not failed.
 
 ## License
 

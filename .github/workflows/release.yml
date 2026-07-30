@@ -43,8 +43,12 @@ jobs:
           sha256sum "${name}" >> SHA256SUMS
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify the binary runs
-        run: ./dist/${{ steps.stage.outputs.name }} --help
+      - name: Verify the binary and its version
+        run: |
+          set -eu
+          ./dist/${{ steps.stage.outputs.name }} --help
+          got=$(./dist/${{ steps.stage.outputs.name }} --version | cut -d' ' -f1-2)
+          test "$got" = "citop ${GITHUB_REF_NAME#v}"
 
       - uses: actions/attest-build-provenance@v1
         with:
