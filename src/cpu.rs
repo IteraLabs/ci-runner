@@ -15,29 +15,38 @@ pub struct Load {
     pub threads: u64,
 }
 
-pub fn parse_stat(data: &[u8]) -> Option<CpuTimes> {
+fn parse_cpu_line(line: &[u8]) -> Option<CpuTimes> {
+    let mut total: u64 = 0;
+    let mut idle: u64 = 0;
+    for (i, f) in fields(line).skip(1).take(8).enumerate() {
+        let v = parse_u64(f)?;
+        total = total.saturating_add(v);
+        if i == 3 || i == 4 {
+            idle = idle.saturating_add(v);
+        }
+    }
+    if total == 0 { None } else { Some(CpuTimes { total, idle }) }
+}
+
+pub fn parse_stat_all(data: &[u8], cores: &mut Vec<CpuTimes>) -> Option<CpuTimes> {
+    cores.clear();
+    let mut agg = None;
     for line in lines(data) {
         if !line.starts_with(b"cpu") {
             break;
         }
-        if line.len() < 4 || line[3] != b' ' {
+        if line.len() < 4 {
             continue;
         }
-        let mut total: u64 = 0;
-        let mut idle: u64 = 0;
-        for (i, f) in fields(line).skip(1).take(8).enumerate() {
-            let v = parse_u64(f)?;
-            total = total.saturating_add(v);
-            if i == 3 || i == 4 {
-                idle = idle.saturating_add(v);
-            }
+        if line[3] == b' ' {
+            agg = parse_cpu_line(line);
+        } else if line[3].is_ascii_digit()
+            && let Some(t) = parse_cpu_line(line)
+        {
+            cores.push(t);
         }
-        if total == 0 {
-            return None;
-        }
-        return Some(CpuTimes { total, idle });
     }
-    None
+    agg
 }
 
 pub fn busy_percent(prev: CpuTimes, cur: CpuTimes) -> Option<u16> {
@@ -82,7 +91,10 @@ pub struct CpuSource {
     load: Probe,
     freq: Probe,
     prev: Option<CpuTimes>,
+    prev_cores: Vec<CpuTimes>,
+    cur_cores: Vec<CpuTimes>,
     pub percent: Option<u16>,
+    pub per_core: Vec<Option<u16>>,
     pub load_avg: Option<Load>,
     pub mhz: Option<u64>,
 }
@@ -97,7 +109,10 @@ impl CpuSource {
                 64,
             ),
             prev: None,
+            prev_cores: Vec::new(),
+            cur_cores: Vec::new(),
             percent: None,
+            per_core: Vec::new(),
             load_avg: None,
             mhz: None,
         }
@@ -105,10 +120,15 @@ impl CpuSource {
 
     pub fn tick(&mut self) {
         if self.stat.refresh()
-            && let Some(cur) = parse_stat(self.stat.data())
+            && let Some(cur) = parse_stat_all(self.stat.data(), &mut self.cur_cores)
         {
             self.percent = self.prev.and_then(|p| busy_percent(p, cur));
             self.prev = Some(cur);
+            self.per_core.resize(self.cur_cores.len(), None);
+            for (i, c) in self.cur_cores.iter().enumerate() {
+                self.per_core[i] = self.prev_cores.get(i).and_then(|p| busy_percent(*p, *c));
+            }
+            std::mem::swap(&mut self.prev_cores, &mut self.cur_cores);
         }
         if self.load.refresh() {
             self.load_avg = parse_loadavg(self.load.data());
@@ -123,37 +143,75 @@ impl CpuSource {
 mod tests {
     use super::*;
 
+    fn agg(data: &[u8]) -> Option<CpuTimes> {
+        parse_stat_all(data, &mut Vec::new())
+    }
+
     const STAT: &[u8] = b"cpu  4372 12 5070 1858281 2674 0 29 3 91 7\n\
 cpu0 979 0 1279 464091 762 0 13 0 0 0\n\
 intr 890640 0 7804\n";
 
     #[test]
-    fn parse_stat_reads_the_aggregate_line_not_cpu0() {
-        let t = parse_stat(STAT).unwrap();
+    fn parse_stat_all_reads_the_aggregate_line_not_cpu0() {
+        let t = agg(STAT).unwrap();
         assert_eq!(t.total, 4372 + 12 + 5070 + 1858281 + 2674 + 29 + 3);
         assert_eq!(t.idle, 1858281 + 2674);
     }
 
     #[test]
-    fn parse_stat_excludes_guest_fields_to_avoid_double_counting() {
-        let t = parse_stat(STAT).unwrap();
+    fn parse_stat_all_excludes_guest_fields_to_avoid_double_counting() {
+        let t = agg(STAT).unwrap();
         assert!(!format!("{}", t.total).is_empty());
         assert_eq!(t.total, 1870441);
         assert_ne!(t.total, 1870441 + 91 + 7);
     }
 
     #[test]
-    fn parse_stat_treats_iowait_as_idle() {
-        let t = parse_stat(b"cpu  10 0 10 100 80 0 0 0\n").unwrap();
+    fn parse_stat_all_treats_iowait_as_idle() {
+        let t = agg(b"cpu  10 0 10 100 80 0 0 0\n").unwrap();
         assert_eq!(t.idle, 180);
         assert_eq!(t.total, 200);
     }
 
     #[test]
-    fn parse_stat_rejects_input_without_an_aggregate_line() {
-        assert!(parse_stat(b"intr 1 2 3\n").is_none());
-        assert!(parse_stat(b"cpu0 1 2 3 4 5 6 7 8\n").is_none());
-        assert!(parse_stat(b"").is_none());
+    fn parse_stat_all_separates_aggregate_from_per_core() {
+        let data = b"cpu  10 0 10 100 80 0 0 0\n\
+cpu0 1 0 1 10 8 0 0 0\n\
+cpu1 2 0 2 20 16 0 0 0\n\
+cpu2 3 0 3 30 24 0 0 0\n\
+cpu3 4 0 4 40 32 0 0 0\n\
+intr 1 2 3\n";
+        let mut cores = Vec::new();
+        let agg = parse_stat_all(data, &mut cores).unwrap();
+        assert_eq!(agg.total, 200);
+        assert_eq!(cores.len(), 4);
+        assert_eq!(cores[0].total, 20);
+        assert_eq!(cores[3].total, 80);
+        assert_eq!(cores[1].idle, 36);
+    }
+
+    #[test]
+    fn parse_stat_all_clears_stale_cores_between_calls() {
+        let mut cores = vec![CpuTimes { total: 9, idle: 9 }; 8];
+        parse_stat_all(b"cpu  10 0 10 100 80 0 0 0\ncpu0 1 0 1 10 8 0 0 0\n", &mut cores);
+        assert_eq!(cores.len(), 1);
+    }
+
+    #[test]
+    fn parse_stat_all_stops_at_the_first_non_cpu_line() {
+        let mut cores = Vec::new();
+        parse_stat_all(
+            b"cpu  10 0 10 100 80 0 0 0\ncpu0 1 0 1 10 8 0 0 0\nintr 1\ncpu9 5 0 5 5 5 0 0 0\n",
+            &mut cores,
+        );
+        assert_eq!(cores.len(), 1);
+    }
+
+    #[test]
+    fn parse_stat_all_rejects_input_without_an_aggregate_line() {
+        assert!(agg(b"intr 1 2 3\n").is_none());
+        assert!(agg(b"cpu0 1 2 3 4 5 6 7 8\n").is_none());
+        assert!(agg(b"").is_none());
     }
 
     #[test]

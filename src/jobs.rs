@@ -11,6 +11,38 @@ pub fn comm_is(data: &[u8], want: &str) -> bool {
     &data[..end] == want.as_bytes()
 }
 
+pub fn parse_worker_stamp(name: &str) -> Option<String> {
+    let core = name.strip_prefix("Worker_")?.strip_suffix("-utc.log")?;
+    let (date, time) = core.split_once('-')?;
+    if date.len() != 8 || time.len() != 6 || !date.bytes().chain(time.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!(
+        "{}-{}-{} {}:{} UTC",
+        &date[0..4],
+        &date[4..6],
+        &date[6..8],
+        &time[0..2],
+        &time[2..4]
+    ))
+}
+
+fn newest_worker_log(root: &str) -> Option<String> {
+    let dir = std::fs::read_dir(format!("{root}/_diag")).ok()?;
+    let mut best: Option<String> = None;
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("Worker_") || !name.ends_with(".log") {
+            continue;
+        }
+        if best.as_deref().is_none_or(|b| name > b) {
+            best = Some(name.to_string());
+        }
+    }
+    best
+}
+
 pub fn parse_cgroup_path(data: &[u8]) -> Option<String> {
     for line in lines(data) {
         if let Some(rest) = line.strip_prefix(b"0::") {
@@ -55,12 +87,16 @@ fn scan_proc() -> (u32, bool, Option<u64>) {
 
 pub struct Jobs {
     cgroup: Option<String>,
+    root: Option<String>,
     pub running: u32,
     pub listener: bool,
+    pub last_job: Option<String>,
     countdown: u8,
+    log_countdown: u8,
 }
 
 const EVERY: u8 = 2;
+const LOG_EVERY: u8 = 10;
 
 impl Default for Jobs {
     fn default() -> Self {
@@ -72,11 +108,15 @@ impl Jobs {
     pub fn new() -> Self {
         let mut j = Self {
             cgroup: None,
+            root: None,
             running: 0,
             listener: false,
+            last_job: None,
             countdown: 0,
+            log_countdown: 0,
         };
         j.bootstrap();
+        j.refresh_last_job();
         j
     }
 
@@ -88,6 +128,18 @@ impl Jobs {
             .and_then(|p| std::fs::read(format!("/proc/{p}/cgroup")).ok())
             .and_then(|d| parse_cgroup_path(&d))
             .filter(|p| std::path::Path::new(p).exists());
+        self.root = pid
+            .and_then(|p| std::fs::read_link(format!("/proc/{p}/cwd")).ok())
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+
+    fn refresh_last_job(&mut self) {
+        let Some(root) = self.root.as_deref() else {
+            return;
+        };
+        if let Some(stamp) = newest_worker_log(root).as_deref().and_then(parse_worker_stamp) {
+            self.last_job = Some(stamp);
+        }
     }
 
     fn count_via_cgroup(&self) -> Option<(u32, bool)> {
@@ -107,17 +159,27 @@ impl Jobs {
     }
 
     pub fn tick(&mut self) {
+        if self.log_countdown == 0 {
+            self.refresh_last_job();
+            self.log_countdown = LOG_EVERY;
+        }
+        self.log_countdown -= 1;
+
         if self.countdown > 0 {
             self.countdown -= 1;
             return;
         }
         self.countdown = EVERY;
+        let before = self.running;
         match self.count_via_cgroup() {
             Some((w, true)) => {
                 self.running = w;
                 self.listener = true;
             }
             _ => self.bootstrap(),
+        }
+        if before > 0 && self.running == 0 {
+            self.refresh_last_job();
         }
     }
 
@@ -174,12 +236,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_worker_stamp_formats_the_filename_timestamp() {
+        assert_eq!(
+            parse_worker_stamp("Worker_20260730-183213-utc.log").unwrap(),
+            "2026-07-30 18:32 UTC"
+        );
+        assert_eq!(
+            parse_worker_stamp("Worker_20251201-000000-utc.log").unwrap(),
+            "2025-12-01 00:00 UTC"
+        );
+    }
+
+    #[test]
+    fn parse_worker_stamp_rejects_other_log_names() {
+        assert!(parse_worker_stamp("Runner_20260730-183213-utc.log").is_none());
+        assert!(parse_worker_stamp("Worker_20260730-183213.log").is_none());
+        assert!(parse_worker_stamp("Worker_2026073-183213-utc.log").is_none());
+        assert!(parse_worker_stamp("Worker_abcdefgh-183213-utc.log").is_none());
+        assert!(parse_worker_stamp("").is_none());
+    }
+
+    #[test]
+    fn worker_log_names_sort_chronologically_as_strings() {
+        let mut v = [
+            "Worker_20260730-065647-utc.log",
+            "Worker_20251201-235959-utc.log",
+            "Worker_20260730-183213-utc.log",
+        ];
+        v.sort();
+        assert_eq!(*v.last().unwrap(), "Worker_20260730-183213-utc.log");
+    }
+
+    #[test]
     fn state_reflects_listener_and_worker_presence() {
         let mut j = Jobs {
             cgroup: None,
+            root: None,
             running: 0,
             listener: false,
+            last_job: None,
             countdown: 0,
+            log_countdown: 0,
         };
         assert_eq!(j.state(), "offline");
         j.listener = true;

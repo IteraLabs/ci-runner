@@ -14,7 +14,7 @@ Measured on a Raspberry Pi 4 Model B (Ubuntu 24.04, aarch64), 1 Hz refresh:
 |---|---|---|
 | CPU, 45 s average | 0.64 % of one core | 4.36 % of one core |
 | Resident memory | 2.4 MB | 3.9 MB |
-| Stripped binary | 529 KB | 399 KB |
+| Stripped binary | 595 KB | 399 KB |
 | Threads | 1 | 2 |
 
 ### Display
@@ -26,8 +26,9 @@ Measured on a Raspberry Pi 4 Model B (Ubuntu 24.04, aarch64), 1 Hz refresh:
 | Hardware model | `/proc/device-tree/model` |
 | System capacity | `sysconf(_SC_NPROCESSORS_ONLN)`, cpufreq policy limits, `MemTotal`, `statvfs` |
 | Jobs running | count of `Runner.Worker` processes in the runner's systemd cgroup |
+| Last job | newest `Worker_*.log` filename in the runner's `_diag` directory |
 | CPU speed | `cpufreq/policy0/scaling_cur_freq` |
-| CPU load | `/proc/stat` deltas, `/proc/loadavg` |
+| CPU load | per-core `/proc/stat` deltas, `/proc/loadavg` |
 | Temperature | `/sys/class/thermal/thermal_zone0/temp` |
 | RAM usage | `/proc/meminfo`, `MemTotal - MemAvailable` |
 | Disk usage | `statvfs("/")` |
@@ -89,9 +90,20 @@ Signals bypass that path, so `SIGTERM`, `SIGHUP`, `SIGINT` and `SIGQUIT` are
 caught by a handler that restores the saved termios, leaves the alternate
 screen, and re-raises with the default disposition.
 
+One row per logical core is drawn from the `cpuN` lines of `/proc/stat`; the
+aggregate percentage, shared clock and load average sit in the block title. All
+four cores fit alongside the other meters at 80x24. On a machine with more cores
+than the terminal has rows, the per-core rows collapse back to a single
+aggregate row rather than truncating the panels below.
+
+The last job timestamp is read from the newest `Worker_*.log` filename rather
+than from its mtime, so it reports when the job started and needs no calendar
+arithmetic. Those filenames sort chronologically as plain strings. The scan runs
+every ten ticks and immediately after a worker exits.
+
 Release profile uses `opt-level = "z"`, fat LTO, one codegen unit, `panic =
 "abort"` and symbol stripping. Measured against `opt-level = "s"` on the target:
-529,168 bytes versus 594,704.
+529,168 bytes versus 594,704 for the single-CPU-row version.
 
 ### Test
 

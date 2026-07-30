@@ -8,6 +8,7 @@ use crate::app::App;
 use crate::fmt;
 
 const LABEL: usize = 7;
+const KEYW: usize = 9;
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const KEY: Style = Style::new().fg(Color::Gray);
 
@@ -27,7 +28,11 @@ fn bar_width(total: u16) -> usize {
     usable.clamp(8, 32) as usize
 }
 
-fn meter<'a>(label: &'a str, percent: Option<u16>, right: String, width: usize) -> Line<'a> {
+fn meter(label: &str, percent: Option<u16>, right: String, width: usize) -> Line<'static> {
+    meter_owned(label.to_string(), percent, right, width)
+}
+
+fn meter_owned(label: String, percent: Option<u16>, right: String, width: usize) -> Line<'static> {
     let mut spans = vec![Span::styled(format!("{label:<LABEL$}"), KEY)];
     match percent {
         Some(p) => {
@@ -48,7 +53,7 @@ fn meter<'a>(label: &'a str, percent: Option<u16>, right: String, width: usize) 
 
 fn kv<'a>(key: &'a str, value: String) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!(" {key:<LABEL$}"), KEY),
+        Span::styled(format!(" {key:<KEYW$}"), KEY),
         Span::raw(value),
     ])
 }
@@ -111,39 +116,61 @@ fn runner(app: &App) -> Paragraph<'_> {
         _ => Style::new().fg(Color::Red),
     };
     let s = Line::from(vec![
-        Span::styled(format!(" {:<LABEL$}", "runner"), KEY),
+        Span::styled(format!(" {:<KEYW$}", "runner"), KEY),
         Span::styled(state, style),
     ]);
     let up = app.uptime.secs.map(fmt::hms).unwrap_or_else(|| "--".into());
+    let last = app
+        .jobs
+        .last_job
+        .clone()
+        .unwrap_or_else(|| "never".into());
     Paragraph::new(vec![
         s,
         kv("jobs", app.jobs.running.to_string()),
         kv("uptime", up),
+        kv("last job", last),
     ])
 }
 
-fn meters(app: &App, width: u16) -> Paragraph<'_> {
-    let w = bar_width(width);
-    let mut out = Vec::with_capacity(5);
-
+pub fn cpu_summary(app: &App) -> String {
+    let agg = app
+        .cpu
+        .percent
+        .map(|p| format!("cpu {p}%"))
+        .unwrap_or_else(|| "cpu --".into());
+    let mhz = app
+        .cpu
+        .mhz
+        .map(|m| format!("  {m} MHz"))
+        .unwrap_or_default();
     let load = app
         .cpu
         .load_avg
         .map(|l| {
             format!(
-                "load {} {} {}",
+                "  load {} {} {}",
                 fmt::centi(l.one),
                 fmt::centi(l.five),
                 fmt::centi(l.fifteen)
             )
         })
         .unwrap_or_default();
-    let mhz = app
-        .cpu
-        .mhz
-        .map(|m| format!("{m} MHz  "))
-        .unwrap_or_default();
-    out.push(meter("cpu", app.cpu.percent, format!("{mhz}{load}"), w));
+    format!(" {agg}{mhz}{load} ")
+}
+
+fn meters(app: &App, width: u16, cpu_rows: usize) -> Paragraph<'_> {
+    let w = bar_width(width);
+    let mut out = Vec::with_capacity(cpu_rows + 4);
+
+    if cpu_rows > 1 {
+        for i in 0..cpu_rows {
+            let p = app.cpu.per_core.get(i).copied().flatten();
+            out.push(meter_owned(format!("cpu_{i}"), p, String::new(), w));
+        }
+    } else {
+        out.push(meter("cpu", app.cpu.percent, String::new(), w));
+    }
 
     let tright = match (app.therm.milli_c, app.therm.trip_milli_c) {
         (Some(t), Some(trip)) => format!("{} C  fan trip {} C", fmt::milli(t), fmt::milli(trip)),
@@ -242,18 +269,32 @@ fn network(app: &App) -> Paragraph<'_> {
     ])
 }
 
+pub const FIXED_ROWS: u16 = 20;
+
+pub fn cpu_rows_for(height: u16, cores: usize) -> usize {
+    if cores <= 1 {
+        return 1;
+    }
+    if height >= FIXED_ROWS + cores as u16 {
+        cores
+    } else {
+        1
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    let cpu_rows = cpu_rows_for(area.height, app.cpu.per_core.len().max(app.host.cores));
     let [top, cap, met, net, foot] = Layout::vertical([
-        Constraint::Length(5),
+        Constraint::Length(3),
         Constraint::Length(6),
-        Constraint::Length(7),
+        Constraint::Length(cpu_rows as u16 + 6),
         Constraint::Length(4),
-        Constraint::Min(1),
+        Constraint::Min(0),
     ])
     .areas(area);
 
-    frame.render_widget(header(app).block(Block::bordered().border_style(DIM)), top);
+    frame.render_widget(header(app), top);
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(cap);
@@ -275,10 +316,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     );
 
     frame.render_widget(
-        meters(app, met.width).block(
+        meters(app, met.width, cpu_rows).block(
             Block::bordered()
                 .border_style(DIM)
-                .title(Span::styled(" system ", KEY)),
+                .title(Span::styled(cpu_summary(app), KEY)),
         ),
         met,
     );
@@ -333,6 +374,51 @@ mod tests {
     fn meter_renders_placeholders_before_the_first_delta() {
         let line = meter("cpu", None, String::new(), 8);
         assert!(line.to_string().contains("--"));
+    }
+
+    #[test]
+    fn per_core_rows_are_shown_when_the_terminal_is_tall_enough() {
+        assert_eq!(cpu_rows_for(24, 4), 4);
+        assert_eq!(cpu_rows_for(30, 4), 4);
+        assert_eq!(cpu_rows_for(28, 8), 8);
+    }
+
+    #[test]
+    fn per_core_rows_collapse_to_aggregate_when_too_short() {
+        assert_eq!(cpu_rows_for(23, 4), 1);
+        assert_eq!(cpu_rows_for(10, 4), 1);
+        assert_eq!(cpu_rows_for(24, 8), 1);
+    }
+
+    #[test]
+    fn a_single_core_machine_never_disaggregates() {
+        assert_eq!(cpu_rows_for(60, 1), 1);
+        assert_eq!(cpu_rows_for(60, 0), 1);
+    }
+
+    #[test]
+    fn core_labels_are_zero_indexed_and_padded() {
+        let line = meter_owned("cpu_0".into(), Some(50), String::new(), 8);
+        assert!(line.to_string().starts_with("cpu_0  "));
+    }
+
+    #[test]
+    fn kv_keeps_a_separator_after_the_longest_key() {
+        for key in ["cpu", "ram", "disk", "tasks", "runner", "uptime", "last job"] {
+            let s = kv(key, "VALUE".into()).to_string();
+            assert!(
+                s.contains(&format!("{key} ")),
+                "key {key} has no separator before its value: {s:?}"
+            );
+            assert!(s.ends_with("VALUE"));
+        }
+    }
+
+    #[test]
+    fn kv_columns_align_across_both_panels() {
+        let a = kv("cpu", "X".into()).to_string();
+        let b = kv("last job", "X".into()).to_string();
+        assert_eq!(a.find('X'), b.find('X'));
     }
 
     #[test]
