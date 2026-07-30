@@ -1,0 +1,24 @@
+[package]
+name = "ci-runner"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "Lightweight terminal dashboard for self-hosted CI runners on small devices"
+repository = "https://github.com/IteraLabs/ci-runner"
+publish = false
+
+[[bin]]
+name = "citop"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
